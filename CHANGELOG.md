@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Fail-fast mode
+
+- New flag `--fail-fast` (also `REF_DOWNLOADER_FAIL_FAST=1`) terminates the
+  run after the first ref that hits an unresolved status it can't recover
+  from. Useful in CI / overnight batches where waiting for 80 refs only
+  to discover they're all failing wastes hours.
+- `is_fail_fast_mode()` is the single entry point; the check fires at the
+  end of each ref iteration. When triggered, the script:
+  1. Logs `fail_fast_stop` to `events.jsonl` with the unresolved status.
+  2. Cancels both async queues (`auto_manual_retries`,
+     `auto_asset_downloads`) to free the Edge context.
+  3. Breaks out of the main ref loop. The post-loop final-drain blocks
+     (manual queue flush, wait=True async drains) all check
+     `stop_after_current_ref` and skip cleanly.
+- 5 new report inspection helpers categorize report rows for fail-fast
+  decisions:
+  - `report_row_has_unresolved(row)` — any non-terminal status
+    (`manual_pending`, `failed`, `not_found`)?
+  - `report_row_has_scheduled_auto_retry(row)` — waiting on a background
+    auto-retry (`auto_retry=scheduled` or `auto_asset=scheduled` in the
+    status string)?
+  - `report_row_has_actionable_unresolved(row)` — unresolved AND not just
+    waiting on a scheduled retry. **This is the fail-fast trigger.**
+  - `first_actionable_unresolved_row(report)` — scan the report for the
+    first row matching the above (returns None if everything's healthy
+    or scheduled).
+  - `unresolved_report_reason(row)` — formats the status pair as
+    `pdf=... | si=...` for logging.
+- Refs waiting on a background `auto_retry=scheduled` / `auto_asset=scheduled`
+  status do **not** trigger fail-fast. The retry may still succeed and
+  mark the ref `downloaded`; stopping the run before that resolves would
+  surface a false positive.
+- SI-only failures also trip fail-fast (e.g. `pdf_status=downloaded` +
+  `si_status=failed (...)`). The reasoning: if SI capture is breaking
+  consistently, you want to know now — not after 80 refs ran. Pass
+  `--auto` without `--fail-fast` if you want to ride through SI hiccups.
+- `main()` prints `Fail fast: True/False` at startup so users can
+  confirm the flag took effect.
+
 ### Added — Elsevier strengthening (helpers, mostly dead code)
 
 - `ELSEVIER_TRANSIENT_POPUP_REASONS` widened from 2 → 5 reasons (adds

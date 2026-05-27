@@ -265,6 +265,56 @@ def is_auto_mode() -> bool:
     return "--auto" in sys.argv
 
 
+def is_fail_fast_mode() -> bool:
+    """Fail-fast mode terminates the run after the first ref that can't be
+    fully resolved, even when other refs could still succeed. Useful for
+    CI: surfaces problems immediately instead of running through 80 refs
+    and noticing 12 hours later that they're all failing.
+
+    Triggered by `--fail-fast` on the CLI or env `REF_DOWNLOADER_FAIL_FAST=1`.
+    Refs whose only issue is a scheduled background retry don't trip
+    fail-fast (see `report_row_has_actionable_unresolved`).
+    """
+    return "--fail-fast" in sys.argv or env_flag("REF_DOWNLOADER_FAIL_FAST", default=False)
+
+
+def report_row_has_unresolved(row: Dict[str, Any]) -> bool:
+    """Report row has any non-terminal failure state (manual_pending /
+    failed / not_found)."""
+    status_text = f"{row.get('pdf_status', '')} {row.get('si_status', '')}".lower()
+    return any(token in status_text for token in ("manual_pending", "failed", "not_found"))
+
+
+def report_row_has_scheduled_auto_retry(row: Dict[str, Any]) -> bool:
+    """Report row has a scheduled background retry (auto_manual or auto_asset
+    queue). These rows shouldn't trip fail-fast — they may resolve later.
+
+    Note: `auto_retry=scheduled` is currently produced (auto_manual_retry
+    materializer); `auto_asset=scheduled` is forward-compat for when
+    Commit B's `schedule_auto_asset_download` queue is actually invoked
+    by the SI capture rework. Until then the second clause matches nothing.
+    """
+    status_text = f"{row.get('pdf_status', '')} {row.get('si_status', '')}".lower()
+    return "auto_retry=scheduled" in status_text or "auto_asset=scheduled" in status_text
+
+
+def report_row_has_actionable_unresolved(row: Dict[str, Any]) -> bool:
+    """Report row needs human attention right now (unresolved AND not waiting
+    on a scheduled retry). Fail-fast triggers on this."""
+    return report_row_has_unresolved(row) and not report_row_has_scheduled_auto_retry(row)
+
+
+def first_actionable_unresolved_row(report: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for row in report:
+        if report_row_has_actionable_unresolved(row):
+            return row
+    return None
+
+
+def unresolved_report_reason(row: Dict[str, Any]) -> str:
+    return f"pdf={row.get('pdf_status', '')} | si={row.get('si_status', '')}"
+
+
 def selected_browser_backend() -> str:
     """Return the active browser backend: "edge" (default) or "cloak".
 
@@ -4941,6 +4991,7 @@ async def main():
     print(f"To download: {total} verified refs")
     print(f"Run dir:  {run_dir}")
     print(f"Backend:  {selected_browser_backend()}")
+    print(f"Fail fast: {is_fail_fast_mode()}")
 
     if using_cloakbrowser():
         cloak_profile = os.environ.get("REF_DOWNLOADER_CLOAK_PROFILE", CLOAKBROWSER_DEFAULT_PROFILE)
@@ -4970,6 +5021,7 @@ async def main():
         print()
 
     report = []
+    stop_after_current_ref = False  # tripped by fail-fast on actionable unresolved refs
 
     async with async_playwright() as pw:
         ctx = await launch_edge_context(pw)
@@ -5063,7 +5115,24 @@ async def main():
                     else:
                         raise
 
-        if not auto_mode:
+            # Fail-fast check (end of each ref iteration). Stops the run early
+            # when a ref hits an unresolved status that's NOT just waiting on
+            # a scheduled background retry — useful for CI surfacing real
+            # failures fast instead of burning hours on 80 refs.
+            if is_fail_fast_mode():
+                pending_failure = first_actionable_unresolved_row(report)
+                if pending_failure:
+                    stop_after_current_ref = True
+                    detail = unresolved_report_reason(pending_failure)
+                    log_event("ref", "fail_fast_stop", STATUS_FAILED, "", detail)
+                    print(f"\n  ✗ Fail-fast stop at [{int(pending_failure['id']):02d}] {pending_failure['label']}: {detail}")
+
+            if stop_after_current_ref:
+                await cancel_auto_manual_retries("fail_fast_stop", report)
+                await cancel_auto_asset_downloads("fail_fast_stop", report)
+                break
+
+        if not auto_mode and not stop_after_current_ref:
             try:
                 await flush_manual_queue(
                     ctx,
@@ -5082,7 +5151,7 @@ async def main():
                 else:
                     raise
 
-        if auto_mode:
+        if auto_mode and not stop_after_current_ref:
             try:
                 await drain_due_auto_manual_retries(ctx, report, wait=True)
             except PlaywrightError as e:
