@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from playwright.async_api import BrowserContext, Page, async_playwright, Error as PlaywrightError
@@ -203,7 +203,22 @@ ELSEVIER_HOT_AUTO_RETRY_REASONS = {
 ELSEVIER_TRANSIENT_POPUP_REASONS = {
     "elsevier_crasolve_shell",
     "elsevier_pdf_security_verification",
+    "elsevier_popup_not_captured",
+    "auto_retry_no_pdf",
+    "radware_bot_manager",
 }
+
+# SI / asset probing constants. Used by elsevier_si_candidate_urls_from_pii +
+# probe_elsevier_si_asset_urls (introduced in this commit; not yet called from
+# the SI capture path — wire-in lands with the SI rework).
+ELSEVIER_SI_CANDIDATE_EXTENSIONS = ("mp4", "pdf", "docx", "doc", "xlsx", "xls", "zip", "csv")
+ELSEVIER_SI_NO_EVIDENCE_PROBE_EXTENSIONS = ("mp4", "pdf", "docx", "zip")
+ELSEVIER_SI_MAX_MMC = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_SI_MAX_MMC", "5"))
+ELSEVIER_SI_CANDIDATE_LIMIT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_SI_CANDIDATE_LIMIT", "50"))
+ELSEVIER_SI_PROBE_TIMEOUT = 5_000
+ELSEVIER_SI_CURL_PROBE_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_SI_CURL_PROBE_TIMEOUT_MS", "10000"))
+ELSEVIER_SI_DOWNLOAD_ALL_TIMEOUT = 25_000
+ELSEVIER_ASSET_REQUEST_TIMEOUT = 20_000
 ELSEVIER_PRE_CLICK_MIN_WAIT_MS = 8_000
 ELSEVIER_PRE_CLICK_MAX_WAIT_MS = 10_000
 ELSEVIER_POPUP_POLL_MS = 15_000
@@ -2331,13 +2346,184 @@ def extract_elsevier_pii(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def extract_elsevier_pii_from_blob(text: str) -> Optional[str]:
+    """Extract a PII (e.g. S2589004221012645) from any blob — used when the
+    article URL did not contain `/pii/` but a sibling field on Crossref did.
+    """
+    blob = text or ""
+    for pattern in (
+        r"PII[:/\s]+([A-Za-z0-9]+)",
+        r"1-s2\.0-([A-Za-z0-9]+)",
+        r"/pii/([A-Za-z0-9]+)",
+    ):
+        match = re.search(pattern, blob)
+        if match:
+            return re.sub(r"[^A-Za-z0-9]", "", match.group(1))
+    return None
+
+
+def extract_elsevier_pii_from_crossref_message(message: Dict[str, Any]) -> Optional[str]:
+    """Probe URL / resource / article-number / link fields of a Crossref message
+    record for an Elsevier PII. Returns the first match or None.
+    """
+    blobs: List[str] = []
+    for key in ("URL", "resource", "article-number"):
+        value = message.get(key)
+        if isinstance(value, str):
+            blobs.append(value)
+        elif isinstance(value, dict):
+            blobs.append(json.dumps(value, ensure_ascii=False))
+    for link in message.get("link", []) or []:
+        if isinstance(link, dict):
+            blobs.append(json.dumps(link, ensure_ascii=False))
+    return extract_elsevier_pii_from_blob("\n".join(blobs))
+
+
+async def elsevier_pii_from_crossref(page: Page, doi: str) -> Optional[str]:
+    """Reverse-lookup an Elsevier PII via the Crossref API. Useful when the
+    article landing URL is missing or wrong but Crossref recorded the
+    canonical sciencedirect link. Returns None on any HTTP / parsing error;
+    callers fall through to the regular Elsevier flow.
+    """
+    clean_doi = (doi or "").strip()
+    if not clean_doi:
+        return None
+    url = f"https://api.crossref.org/works/{quote(clean_doi, safe='')}"
+    try:
+        resp = await page.context.request.get(
+            url,
+            timeout=min(RESPONSE_BODY_TIMEOUT, 10_000),
+            headers={"Accept": "application/json"},
+        )
+        log_event("si", "elsevier_crossref_pii", f"http_{resp.status}", url, clean_doi)
+        if not resp.ok:
+            return None
+        data = await resp.json()
+        message = data.get("message", {}) if isinstance(data, dict) else {}
+        pii = extract_elsevier_pii_from_crossref_message(message)
+        if pii:
+            log_event("si", "elsevier_crossref_pii", "found", url, pii)
+        return pii
+    except Exception as e:
+        log_event("si", "elsevier_crossref_pii", STATUS_FAILED, url, str(e)[:120])
+        return None
+
+
 def elsevier_article_url_from_pii(pii: str) -> str:
     return f"https://www.sciencedirect.com/science/article/pii/{pii}"
+
+
+def elsevier_pdfft_url_from_pii(pii: str) -> str:
+    """Construct the Elsevier pdfft (PDF full-text) URL directly from PII.
+    Equivalent to clicking the "View PDF" button on the article page, but
+    skips the JS handoff — useful when the popup capture stalls.
+    """
+    return f"{elsevier_article_url_from_pii(pii)}/pdfft?isDTMRedir=true&download=true"
+
+
+def elsevier_si_candidate_urls_from_pii(pii: str, max_mmc: int = ELSEVIER_SI_MAX_MMC) -> List[str]:
+    """Enumerate Elsevier SI asset URLs by mmc index + extension.
+    Asset paths follow `1-s2.0-{PII}-mmc{N}.{ext}` on ars.els-cdn.com.
+    Returns at most `max_mmc * len(ELSEVIER_SI_CANDIDATE_EXTENSIONS)` URLs.
+    """
+    clean_pii = re.sub(r"[^A-Za-z0-9]", "", pii or "")
+    if not clean_pii:
+        return []
+    urls: List[str] = []
+    for idx in range(1, max_mmc + 1):
+        for ext in ELSEVIER_SI_CANDIDATE_EXTENSIONS:
+            urls.append(f"https://ars.els-cdn.com/content/image/1-s2.0-{clean_pii}-mmc{idx}.{ext}")
+    return urls
+
+
+async def probe_elsevier_si_asset_urls(
+    ctx: Optional[BrowserContext],
+    pii: str,
+    *,
+    has_text_evidence: bool,
+) -> List[str]:
+    """HEAD-probe Elsevier SI candidate URLs to find which ones actually exist.
+    When `has_text_evidence` is True (page mentions "supplementary data" etc),
+    probe up to MAX_MMC indices across all extensions; otherwise probe just
+    mmc1 with a reduced extension set to save requests.
+    Falls back to system curl HEAD if the browser request fails (Elsevier
+    sometimes blocks Playwright on the ARS CDN).
+    """
+    if ctx is None:
+        return []
+    clean_pii = re.sub(r"[^A-Za-z0-9]", "", pii or "")
+    if not clean_pii:
+        return []
+
+    max_mmc = ELSEVIER_SI_MAX_MMC if has_text_evidence else 1
+    extensions = ELSEVIER_SI_CANDIDATE_EXTENSIONS if has_text_evidence else ELSEVIER_SI_NO_EVIDENCE_PROBE_EXTENSIONS
+    found: List[str] = []
+    for idx in range(1, max_mmc + 1):
+        for ext in extensions:
+            url = f"https://ars.els-cdn.com/content/image/1-s2.0-{clean_pii}-mmc{idx}.{ext}"
+            try:
+                resp = await ctx.request.head(url, timeout=ELSEVIER_SI_PROBE_TIMEOUT, max_redirects=2)
+                ct = resp.headers.get("content-type", "")
+                log_event("si", "elsevier_si_probe", f"http_{resp.status}", url, ct[:80])
+                if resp.ok:
+                    found.append(url)
+                    continue
+            except Exception as e:
+                log_event("si", "elsevier_si_probe", STATUS_FAILED, url, str(e)[:120])
+                curl_probe = await asyncio.to_thread(probe_asset_via_curl_head, url, ELSEVIER_SI_CURL_PROBE_TIMEOUT)
+                status = curl_probe.get("status")
+                detail = curl_probe.get("content_type") or curl_probe.get("detail") or curl_probe.get("reason", "")
+                log_event("si", "elsevier_si_probe_curl", f"http_{status}" if status else curl_probe.get("reason", STATUS_FAILED), url, str(detail)[:120])
+                if curl_probe.get("ok"):
+                    found.append(url)
+        if found and not has_text_evidence:
+            break
+    return found
+
+
+# APS (Physical Review) URL construction — bypass landing page when DOI is enough.
+APS_JOURNAL_SLUGS = {
+    "PhysRevMaterials": "prmaterials",
+    "PhysRevLett": "prl",
+    "PhysRevA": "pra",
+    "PhysRevB": "prb",
+    "PhysRevC": "prc",
+    "PhysRevD": "prd",
+    "PhysRevE": "pre",
+    "PhysRevX": "prx",
+    "RevModPhys": "rmp",
+}
+
+
+def aps_pdf_url_from_doi(doi: str) -> Optional[str]:
+    """Direct PDF URL for APS journals from DOI, skipping the landing page.
+    Returns None for non-APS DOIs or APS journals not in APS_JOURNAL_SLUGS.
+    """
+    if not (doi or "").startswith("10.1103/"):
+        return None
+    suffix = doi.split("/", 1)[1]
+    journal = suffix.split(".", 1)[0]
+    slug = APS_JOURNAL_SLUGS.get(journal)
+    if not slug:
+        return None
+    return f"https://journals.aps.org/{slug}/pdf/{doi}"
 
 
 def is_elsevier_crasolve_shell(url: str) -> bool:
     lowered = (url or "").lower()
     return "sciencedirect.com" in lowered and "crasolve=1" in lowered and "/pdfft" in lowered
+
+
+def is_elsevier_article_surface(url: str) -> bool:
+    """Whether a URL is an Elsevier article landing surface (sciencedirect or
+    linkinghub). Used to gate Elsevier-specific re-click loops to only fire
+    when the page is actually on an Elsevier article.
+    """
+    lowered = lower_unquoted(url or "")
+    return (
+        "sciencedirect.com/science/article" in lowered
+        or "linkinghub.elsevier.com/retrieve/pii" in lowered
+    )
 
 
 def looks_like_valid_pdf(path: Path, stage: str) -> tuple[bool, str]:
@@ -3257,6 +3443,105 @@ def download_asset_via_urllib(url: str, dest: Path, ext: str, timeout_ms: int) -
             pass
 
 
+def parse_curl_head_output(raw_headers: str) -> Dict[str, Any]:
+    """Parse a `curl -I -L` raw header block into a dict.
+
+    Returns `{"status": last_status_or_None, "headers": dict_of_last_headers}`.
+    With `-L`, curl emits one header block per redirect; we want the headers
+    from the final response, so this walks through and keeps only the last
+    block.
+    """
+    status: Optional[int] = None
+    current_headers: List[str] = []
+    last_headers: List[str] = []
+    for line in (raw_headers or "").replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            if current_headers:
+                last_headers = current_headers
+                current_headers = []
+            continue
+        if stripped.lower().startswith("http/"):
+            if current_headers:
+                last_headers = current_headers
+            current_headers = []
+            parts = stripped.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                status = int(parts[1])
+            continue
+        if ":" in stripped:
+            current_headers.append(stripped)
+    if current_headers:
+        last_headers = current_headers
+
+    headers: Dict[str, str] = {}
+    for line in last_headers:
+        key, value = line.split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return {"status": status, "headers": headers}
+
+
+def probe_asset_via_curl_head(url: str, timeout_ms: int) -> Dict[str, Any]:
+    """HEAD-probe an asset URL via system curl. Used by probe_elsevier_si_asset_urls
+    as a fallback when Playwright's context.request.head() fails — Elsevier
+    sometimes blocks Playwright on the ARS CDN but lets curl through.
+
+    Returns a dict shape that callers can read uniformly: `{"ok": bool,
+    "reason": str, "status": int|None, "curl_exit": int, "content_type": str,
+    "content_length": str, "detail": str}`. `ok=False` with `reason="curl_missing"`
+    means no curl on PATH — caller should treat as a soft fail.
+    """
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        return {"ok": False, "reason": "curl_missing"}
+
+    timeout_s = max(1, int((timeout_ms + 999) / 1000))
+    cmd = [
+        curl,
+        "-I",
+        "-L",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        str(timeout_s),
+        "-A",
+        BINARY_ASSET_USER_AGENT,
+        "-H",
+        "Referer: https://www.sciencedirect.com/",
+        url,
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s + 5,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "curl_head_timeout"}
+    except OSError as e:
+        return {"ok": False, "reason": "curl_head_failed", "error": str(e)[:160]}
+
+    parsed = parse_curl_head_output(completed.stdout or "")
+    status = parsed.get("status")
+    headers = parsed.get("headers") or {}
+    ok = completed.returncode == 0 and isinstance(status, int) and 200 <= status < 400
+    reason = "ok" if ok else "curl_head_http_error"
+    if completed.returncode != 0:
+        reason = "curl_head_failed"
+    return {
+        "ok": ok,
+        "reason": reason,
+        "status": status,
+        "curl_exit": completed.returncode,
+        "content_type": headers.get("content-type", ""),
+        "content_length": headers.get("content-length", ""),
+        "detail": (completed.stderr or completed.stdout or "").strip()[:160],
+    }
+
+
 def find_existing_si_asset(base: Path) -> Optional[Path]:
     for path in sorted(base.parent.glob(base.name + ".*")):
         if path.is_file():
@@ -3423,6 +3708,28 @@ def is_probable_si_anchor(url: str, text: str, publisher: str) -> bool:
         return True
 
     return False
+
+
+def elsevier_has_si_text_evidence(html: str, anchors: List[Dict[str, str]]) -> bool:
+    """Check page HTML + anchor text for signals that SI exists at all.
+
+    Used to decide whether `probe_elsevier_si_asset_urls` should attempt the
+    full mmc1..mmcN sweep (expensive) or just probe mmc1 (cheap). When the
+    page contains no SI markers, scanning every extension wastes requests.
+    """
+    html_lower = lower_unquoted(html or "")
+    anchor_text = " ".join((item.get("text") or "") for item in anchors).lower()
+    evidence_tokens = (
+        "appendix a. supplementary data",
+        "supplementary data",
+        "supplementary material",
+        "supplementary file",
+        "supplementary files",
+        "download all supplementary",
+        "download supplementary",
+        "extras (",
+    )
+    return any(token in html_lower or token in anchor_text for token in evidence_tokens)
 
 
 async def collect_anchor_records(page: Page) -> List[Dict[str, str]]:

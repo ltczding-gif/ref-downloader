@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Elsevier strengthening (helpers, mostly dead code)
+
+- `ELSEVIER_TRANSIENT_POPUP_REASONS` widened from 2 → 5 reasons (adds
+  `elsevier_popup_not_captured`, `auto_retry_no_pdf`, `radware_bot_manager`).
+  **`auto_retry_no_pdf` and `radware_bot_manager` are immediately active**:
+  the popup-settle loop in `wait_for_elsevier_popup_surface_ready` now
+  treats them as transient and keeps waiting instead of giving up. Both
+  reasons are emitted upstream (`inspect_access_barrier` produces
+  `radware_bot_manager`; `auto_manual_retry_worker` produces
+  `auto_retry_no_pdf`). `elsevier_popup_not_captured` has no emitter yet
+  — it gets one when the deferred-click integration lands in Commit E.
+  Expected effect: fewer false `manual_pending (elsevier_*)` refs when
+  Elsevier bounces through Radware or the auto-retry loop sees no PDF
+  on first pass.
+- 11 new helpers (all dead code until SI capture rework wires them in):
+  - **PII reverse-lookup**: `extract_elsevier_pii_from_blob`,
+    `extract_elsevier_pii_from_crossref_message`,
+    `elsevier_pii_from_crossref(page, doi)`. Get the canonical PII when
+    the article URL itself doesn't carry one (Crossref records the PII in
+    `URL` / `resource` / `link` fields for Elsevier deposits).
+  - **URL construction**: `elsevier_pdfft_url_from_pii`,
+    `elsevier_si_candidate_urls_from_pii` (enumerates
+    `1-s2.0-{PII}-mmc{N}.{ext}` on `ars.els-cdn.com`).
+  - **SI probing**: `probe_elsevier_si_asset_urls` HEAD-probes which mmc
+    URLs actually exist; uses Playwright's `context.request.head()` first,
+    falls back to system curl (`probe_asset_via_curl_head` +
+    `parse_curl_head_output`) when Playwright is blocked on the ARS CDN.
+  - **SI evidence**: `elsevier_has_si_text_evidence(html, anchors)` —
+    page has SI markers? Used to decide cheap probe (mmc1 only) vs
+    expensive probe (all extensions × max_mmc indices).
+  - **Article surface check**: `is_elsevier_article_surface(url)` matches
+    sciencedirect + linkinghub.elsevier.com.
+- APS direct PDF URL helper: `aps_pdf_url_from_doi` constructs
+  `journals.aps.org/<slug>/pdf/<doi>` from the DOI for APS journals
+  (PhysRevB, PhysRevLett, RevModPhys, etc — 9 slugs in `APS_JOURNAL_SLUGS`).
+  Skips the JS-driven landing page entirely. Dead code until Commit E
+  wires it into `direct_pdf_url`.
+
+### Added — Elsevier SI / asset constants
+
+- `ELSEVIER_SI_CANDIDATE_EXTENSIONS` (8 extensions: mp4 / pdf / docx / doc /
+  xlsx / xls / zip / csv) + `ELSEVIER_SI_NO_EVIDENCE_PROBE_EXTENSIONS`
+  (reduced set for "no evidence" probes).
+- 6 timing constants (env-overridable):
+  `ELSEVIER_SI_MAX_MMC=5`, `ELSEVIER_SI_CANDIDATE_LIMIT=50`,
+  `ELSEVIER_SI_PROBE_TIMEOUT=5_000`, `ELSEVIER_SI_CURL_PROBE_TIMEOUT=10_000`,
+  `ELSEVIER_SI_DOWNLOAD_ALL_TIMEOUT=25_000`, `ELSEVIER_ASSET_REQUEST_TIMEOUT=20_000`.
+
+### Deferred to a follow-up commit
+
+- `try_elsevier_pdf` / `try_click_pdf` integration of deferred-click
+  retry (5 attempts × 5.5s interval × 30s total). Constants
+  intentionally not added until the integration lands — unused
+  constants are noise.
+- `auto_retry_elsevier_article_reclicks` + `try_elsevier_si_download_all`
+  — these mutate page state and need careful integration with the
+  existing PDF capture path. Land with the SI rework.
+
 ### Added — Auto-asset async download queue (infrastructure only)
 
 - New async queue dedicated to publisher-hosted binary SI assets
