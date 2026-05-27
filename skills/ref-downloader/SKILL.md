@@ -56,6 +56,30 @@ sequential 3-stage pipeline (`extract_refs.py` → `validate_refs.py` →
 - `--output-dir <path>` — override default output location
 - `--config <path>` — alternate TOML config (overrides `config.local.toml`)
 
+## Alternative backend: CloakBrowser (Cloudflare-heavy sites)
+
+Default backend is Microsoft Edge. For sites that keep blocking ordinary Playwright (Cloudflare Turnstile, Radware, persistent `Just a moment` / 安全验证 pages), switch to the [cloakbrowser](https://pypi.org/project/cloakbrowser/) stealth Chromium backend:
+
+```powershell
+# One-time setup
+pip install cloakbrowser
+
+# Switch backend (env vars; no CLI flag changes)
+$env:REF_DOWNLOADER_BROWSER = "cloak"
+$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"   # optional: slower mouse/scroll
+# Optional overrides:
+# $env:REF_DOWNLOADER_CLOAK_PROFILE = "<custom path>"  # default: ~/.local/cloakbrowser/profiles/ref-downloader
+# $env:REF_DOWNLOADER_CLOAK_PROXY = "http://..."
+# $env:REF_DOWNLOADER_CLOAK_GEOIP = "1"
+
+python "<SKILL_DIR>/scripts/download_refs.py" <PROJECT_NAME>
+```
+
+Caveats:
+- cloakbrowser uses its **own Chromium with a separate profile** — Edge does NOT need to be closed.
+- A fresh cloak profile may still show Cloudflare/security-verification pages on first visit; warm it manually by opening the target site once with the same `REF_DOWNLOADER_CLOAK_PROFILE` and finishing any verification before running the downloader.
+- `human_preset=careful` lowers behavior-detection trigger rates but is **not** a captcha solver.
+
 ## Pre-flight checklist (confirm before running)
 
 1. **DOI correct?** Echo back to user: `即将下载参考文献：DOI=<doi>`

@@ -78,6 +78,7 @@ PDFs land in:      ./jacs.5c05017_refs/jacs.5c05017/
 - **vs. Zotero's _Find Available PDF_** — walks one paper at a time and silently gives up at SSO redirects. ref-downloader walks the whole reference list at once and treats SSO as a configurable step instead of a dead end.
 - **vs. scihub-style tools** — don't carry your institutional license, so paywalled refs you _legitimately_ have access to just fail. ref-downloader uses your authenticated browser session, so subscriptions you already pay for actually count.
 - **vs. generic web scrapers** — don't know Wiley needs PDFDirect, Elsevier needs a viewer click, or AIP serves a Chinese loading page first. ref-downloader has 17+ publisher-specific paths plus Elsevier popup state machine + `--auto` mode retry queue (manual-pending refs get a second async attempt 60s later, hot-session preserved).
+- **vs. raw Playwright** — gets blocked on Cloudflare / Radware / Turnstile-heavy sites. Set `REF_DOWNLOADER_BROWSER=cloak` to swap in [cloakbrowser](https://pypi.org/project/cloakbrowser/)'s stealth Chromium with humanized input — no code changes, same pipeline. See [Configuration](#configuration).
 
 ## Quick start
 
@@ -224,6 +225,35 @@ Environment variables override file values:
 | `REF_DOWNLOADER_CONFIG` | Path to alternate TOML file |
 
 See [`skills/ref-downloader/config.example.toml`](skills/ref-downloader/config.example.toml) for full documentation.
+
+### Alternative backend: CloakBrowser (optional, for Cloudflare-heavy sites)
+
+By default the script drives Microsoft Edge. For sites that block ordinary Playwright (Cloudflare Turnstile, Radware, persistent `Just a moment` / security-verification pages), swap in [cloakbrowser](https://pypi.org/project/cloakbrowser/) — a stealth Chromium with humanized input:
+
+```powershell
+pip install cloakbrowser
+$env:REF_DOWNLOADER_BROWSER = "cloak"
+$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"     # optional: slower mouse/scroll
+python skills/ref-downloader/scripts/run_ref_downloader.py 10.31635/ccsorg...
+```
+
+CloakBrowser env vars (all optional):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REF_DOWNLOADER_BROWSER` | `edge` | Set to `cloak` (or `cloakbrowser`) to switch backend |
+| `REF_DOWNLOADER_CLOAK_PROFILE` | `~/.local/cloakbrowser/profiles/ref-downloader` | Persistent Chromium profile path |
+| `REF_DOWNLOADER_CLOAK_HUMANIZE` | `1` | `0`/`false` to disable humanized input |
+| `REF_DOWNLOADER_CLOAK_HUMAN_PRESET` | `default` | `default` or `careful` (slower) |
+| `REF_DOWNLOADER_CLOAK_PROXY` | _unset_ | HTTP/SOCKS proxy URL |
+| `REF_DOWNLOADER_CLOAK_GEOIP` | auto | `1` to force GeoIP rerouting (auto when proxy is set) |
+| `CLOAKBROWSER_PYTHONPATH` | _unset_ | sys.path hint for a local cloakbrowser source checkout |
+
+Notes:
+- **Edge does not need to be closed** when using the cloak backend — it uses its own Chromium.
+- A fresh cloak profile may still hit Cloudflare/security pages on first visit — warm it manually with that profile before batch downloads.
+- `human_preset=careful` reduces behavior-based detection but is **not** a captcha solver.
+- cloakbrowser is NOT a hard dependency of ref-downloader. If you never set `REF_DOWNLOADER_BROWSER=cloak`, it's not imported.
 
 ## Architecture
 

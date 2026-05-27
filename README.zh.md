@@ -78,6 +78,7 @@ PDFs land in:      ./jacs.5c05017_refs/jacs.5c05017/
 - **vs. Zotero 的 _Find Available PDF_** —— 它一篇一篇走，碰到 SSO 跳转就放弃。ref-downloader 整个参考列表批量走，把 SSO 跳转当成可配置步骤而不是死路。
 - **vs. scihub 类工具** —— 不带你的机构 license，本来你 _合法_ 有权限的付费内容也直接失败。ref-downloader 复用你浏览器里的认证会话，你已经付费的订阅真的算数。
 - **vs. 通用网络爬虫** —— 不知道 Wiley 要走 PDFDirect、Elsevier 要点 viewer、AIP 服务器先返中文加载页。ref-downloader 内置 17+ 出版商专用路径 + Elsevier popup 状态机 + `--auto` 模式异步重试队列（manual_pending 60 秒后自动重试一次，复用热会话）。
+- **vs. 普通 Playwright** —— Cloudflare / Radware / Turnstile 重度站点会被拦下。设 `REF_DOWNLOADER_BROWSER=cloak` 切到 [cloakbrowser](https://pypi.org/project/cloakbrowser/) 隐身 Chromium + 人化输入，不改代码、同一条流水线。详见 [配置](#配置) 一节。
 
 ## 快速开始
 
@@ -224,6 +225,35 @@ python <SKILL_DIR>/scripts/run_ref_downloader.py 10.1021/jacs.5c05017 --config .
 | `REF_DOWNLOADER_CONFIG` | 备选 TOML 路径 |
 
 完整文档参考 [`skills/ref-downloader/config.example.toml`](skills/ref-downloader/config.example.toml)。
+
+### 备用后端：CloakBrowser（可选，应对 Cloudflare 类站点）
+
+默认走 Microsoft Edge。如果某些站点持续把 Playwright 拦下（Cloudflare Turnstile、Radware、持续显示 `Just a moment` / 正在进行安全验证），可以切换到 [cloakbrowser](https://pypi.org/project/cloakbrowser/) —— 一个带人化输入的隐身 Chromium：
+
+```powershell
+pip install cloakbrowser
+$env:REF_DOWNLOADER_BROWSER = "cloak"
+$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"     # 可选：更慢的鼠标/滚动节奏
+python skills/ref-downloader/scripts/run_ref_downloader.py 10.31635/ccsorg...
+```
+
+CloakBrowser 环境变量（都是可选）：
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `REF_DOWNLOADER_BROWSER` | `edge` | 设为 `cloak`（或 `cloakbrowser`）切换后端 |
+| `REF_DOWNLOADER_CLOAK_PROFILE` | `~/.local/cloakbrowser/profiles/ref-downloader` | 持久化 Chromium profile 路径 |
+| `REF_DOWNLOADER_CLOAK_HUMANIZE` | `1` | 设 `0`/`false` 禁用人化输入 |
+| `REF_DOWNLOADER_CLOAK_HUMAN_PRESET` | `default` | `default` 或 `careful`（更慢） |
+| `REF_DOWNLOADER_CLOAK_PROXY` | 未设 | HTTP/SOCKS 代理 URL |
+| `REF_DOWNLOADER_CLOAK_GEOIP` | 自动 | `1` 强制 GeoIP 重路由（设了 proxy 时默认开启） |
+| `CLOAKBROWSER_PYTHONPATH` | 未设 | 给本地 cloakbrowser 源码 checkout 的 sys.path 提示 |
+
+注意：
+- 用 cloak 后端时 **Edge 不需要关**，cloakbrowser 用自己独立的 Chromium。
+- 新 cloak profile 首次访问目标站仍可能停在 Cloudflare/安全验证页 —— 用同一 profile 手动开一次目标站完成验证，再批量下。
+- `human_preset=careful` 降低行为检测概率，但 **不是** 验证码自动求解器。
+- cloakbrowser **不是** ref-downloader 的硬依赖。只要不设 `REF_DOWNLOADER_BROWSER=cloak`，就不会被 import。
 
 ## 架构
 

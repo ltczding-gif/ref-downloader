@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — CloakBrowser backend (optional)
+
+- New alternative browser backend: set `REF_DOWNLOADER_BROWSER=cloak` to drive
+  [cloakbrowser](https://pypi.org/project/cloakbrowser/) instead of Microsoft Edge.
+  cloakbrowser is a stealth Chromium with humanized mouse / scroll / keyboard
+  timings — useful for Cloudflare Turnstile, Radware, and other sites that
+  detect ordinary Playwright fingerprints.
+- cloakbrowser is **not** a hard dependency. Users install it themselves
+  (`pip install cloakbrowser`); the import is lazy and only fires when the env
+  var is set.
+- New env vars (all optional, no config-file equivalent yet):
+  `REF_DOWNLOADER_BROWSER`, `REF_DOWNLOADER_CLOAK_PROFILE`,
+  `REF_DOWNLOADER_CLOAK_HUMANIZE`, `REF_DOWNLOADER_CLOAK_HUMAN_PRESET`
+  (`default` / `careful`), `REF_DOWNLOADER_CLOAK_PROXY`,
+  `REF_DOWNLOADER_CLOAK_GEOIP`, `CLOAKBROWSER_PYTHONPATH` (dev-checkout hint).
+- Default cloak profile path: `~/.local/cloakbrowser/profiles/ref-downloader`
+  (cross-platform via `Path.home()`).
+- When the cloak backend is active, Edge does not need to be closed and the
+  "press Enter when Edge is closed" prompt is skipped.
+
+### Implementation notes
+
+- `launch_edge_context()` now dual-branches on `using_cloakbrowser()`. The Edge
+  branch is bit-identical to v0.3.0; the cloak branch is gated behind the env
+  var so users who never opt in pay zero cost.
+- 4 new helpers: `selected_browser_backend()`, `using_cloakbrowser()`,
+  `selected_cloak_human_preset()`, `cloak_si_fast_human_config()`. The last is
+  the aggressive scroll-pause config used for SI capture under cloak (default
+  preset is too slow for batch SI collection).
+
 ## [0.3.0] — 2026-05-23
 
 ### Added — Elsevier popup state machine

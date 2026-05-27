@@ -187,6 +187,14 @@ SESSION_RESTART_LIMIT_PER_REF = 1
 RUNS_DIR_NAME = "runs"
 ROUND_NAME = "round-03"
 
+# CloakBrowser (optional alt backend): when REF_DOWNLOADER_BROWSER=cloak, the script
+# uses cloakbrowser (stealth Chromium) instead of Microsoft Edge. The cloakbrowser
+# package is NOT a dependency — users install it themselves. We import lazily inside
+# launch_edge_context so users who never set REF_DOWNLOADER_BROWSER=cloak don't
+# need the package at all. The default profile path is Path.home()-derived so it
+# works cross-platform; override with REF_DOWNLOADER_CLOAK_PROFILE.
+CLOAKBROWSER_DEFAULT_PROFILE = str(Path.home() / ".local" / "cloakbrowser" / "profiles" / "ref-downloader")
+
 STATUS_DOWNLOADED = "downloaded"
 STATUS_FAILED = "failed_auto"
 STATUS_MANUAL = "manual_pending"
@@ -212,6 +220,63 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 def is_auto_mode() -> bool:
     return "--auto" in sys.argv
+
+
+def selected_browser_backend() -> str:
+    """Return the active browser backend: "edge" (default) or "cloak".
+
+    Set REF_DOWNLOADER_BROWSER=cloak (or cloakbrowser) to switch to stealth Chromium
+    for Cloudflare/Radware-heavy sites. The cloakbrowser package must be installed
+    separately — it's not a hard dependency of ref-downloader.
+
+    Unknown values fall back to "edge" with a stderr warning so typos like "cloack"
+    don't silently mask intent.
+    """
+    raw = os.environ.get("REF_DOWNLOADER_BROWSER", "").strip()
+    value = raw.lower()
+    if value in ("cloak", "cloakbrowser"):
+        return "cloak"
+    if value and value not in ("edge", "msedge"):
+        print(
+            f"WARNING: REF_DOWNLOADER_BROWSER={raw!r} is not a recognized backend; "
+            "falling back to 'edge'. Valid values: edge, cloak.",
+            file=sys.stderr,
+        )
+    return "edge"
+
+
+def using_cloakbrowser() -> bool:
+    return selected_browser_backend() == "cloak"
+
+
+def selected_cloak_human_preset() -> str:
+    """Return the cloakbrowser humanize preset: "default" or "careful".
+
+    "careful" uses slower mouse/keyboard/scroll timings — helps lower the chance of
+    behavior-based challenges, but it's not a captcha solver.
+    """
+    value = os.environ.get("REF_DOWNLOADER_CLOAK_HUMAN_PRESET", "default").strip().lower()
+    if value in ("default", "careful"):
+        return value
+    return "default"
+
+
+def cloak_si_fast_human_config() -> Dict[str, Any]:
+    """Aggressive scroll-pause config for SI capture under cloakbrowser.
+
+    SI links sit deep in long pages; the default human preset is too slow for batch
+    SI collection. This config keeps the cloak stealth surface but cuts idle gaps.
+    """
+    return {
+        "idle_between_actions": False,
+        "scroll_delta_base": (260, 420),
+        "scroll_pause_fast": (8, 25),
+        "scroll_pause_slow": (25, 75),
+        "scroll_accel_steps": (1, 1),
+        "scroll_decel_steps": (1, 1),
+        "scroll_settle_delay": (80, 180),
+        "scroll_pre_move_delay": (20, 60),
+    }
 
 
 # Shared run-level state. `manual_pages` are the live pages still awaiting attention;
@@ -4024,6 +4089,55 @@ async def flush_manual_queue(
 # ── Edge session lifecycle ────────────────────────────────────────────────────
 
 async def launch_edge_context(pw) -> BrowserContext:
+    """Launch the persistent browser context.
+
+    Two backends are supported:
+    - Default: Microsoft Edge persistent profile (the original path).
+    - REF_DOWNLOADER_BROWSER=cloak: cloakbrowser stealth Chromium. Optional —
+      requires `pip install cloakbrowser` (or its dev path on sys.path via
+      CLOAKBROWSER_PYTHONPATH). Edge does NOT need to be closed for this backend.
+
+    The `pw` arg is the playwright instance; cloakbrowser does not use it, but the
+    function signature stays the same so the rest of the script doesn't care which
+    backend it called.
+    """
+    if using_cloakbrowser():
+        # Optional dev-path hook: lets users point at a local cloakbrowser checkout
+        # without installing the package. Empty / unset → assume normal pip install.
+        cloak_pythonpath = os.environ.get("CLOAKBROWSER_PYTHONPATH", "").strip()
+        if cloak_pythonpath and cloak_pythonpath not in sys.path:
+            sys.path.insert(0, cloak_pythonpath)
+        try:
+            from cloakbrowser import launch_persistent_context_async  # type: ignore[import-not-found]
+        except ImportError as e:
+            raise RuntimeError(
+                "REF_DOWNLOADER_BROWSER=cloak requested but cloakbrowser is not importable. "
+                "Install it with `pip install cloakbrowser`, or set CLOAKBROWSER_PYTHONPATH "
+                f"to a local cloakbrowser source checkout. Original error: {e}"
+            ) from e
+
+        profile = Path(os.environ.get("REF_DOWNLOADER_CLOAK_PROFILE", CLOAKBROWSER_DEFAULT_PROFILE))
+        profile.mkdir(parents=True, exist_ok=True)
+
+        humanize = env_flag("REF_DOWNLOADER_CLOAK_HUMANIZE", default=True)
+        human_preset = selected_cloak_human_preset()
+        proxy = os.environ.get("REF_DOWNLOADER_CLOAK_PROXY") or None
+        geoip = env_flag("REF_DOWNLOADER_CLOAK_GEOIP", default=bool(proxy))
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+
+        return await launch_persistent_context_async(
+            profile,
+            headless=False,
+            humanize=humanize,
+            human_preset=human_preset,
+            proxy=proxy,
+            geoip=geoip,
+            args=launch_args,
+            accept_downloads=True,
+            viewport={"width": 1280, "height": 900},
+        )
+
+    # Edge backend (default).
     launch_args = [
         "--profile-directory=Default",
         "--disable-blink-features=AutomationControlled",
@@ -4105,24 +4219,34 @@ async def main():
     print(f"Input:    {validated_path}")
     print(f"To download: {total} verified refs")
     print(f"Run dir:  {run_dir}")
-    print(f"Edge extensions: {'disabled' if env_flag('REF_DOWNLOADER_DISABLE_EXTENSIONS', default=False) else 'enabled'}")
+    print(f"Backend:  {selected_browser_backend()}")
 
-    # Check Edge
-    edge_user_data = get_edge_user_data_dir()
-    edge_path = Path(edge_user_data)
-    if not edge_path.exists():
-        print(f"\nERROR: Edge user data not found at:\n  {edge_user_data}")
-        sys.exit(1)
-
-    print(f"\n{'='*60}")
-    print("  Please close Microsoft Edge completely!")
-    print("  (Playwright needs exclusive access to Edge profile)")
-    print(f"{'='*60}")
-    if not auto_mode:
-        await asyncio.to_thread(input, "  Press Enter when Edge is closed...")
+    if using_cloakbrowser():
+        cloak_profile = os.environ.get("REF_DOWNLOADER_CLOAK_PROFILE", CLOAKBROWSER_DEFAULT_PROFILE)
+        print(f"Cloak profile:      {cloak_profile}")
+        print(f"Cloak humanize:     {env_flag('REF_DOWNLOADER_CLOAK_HUMANIZE', default=True)}")
+        print(f"Cloak human preset: {selected_cloak_human_preset()}")
+        print()
+        # No Edge-close prompt: cloakbrowser uses its own Chromium with a separate profile.
     else:
-        print("  (auto mode — skipping confirmation)")
-    print()
+        print(f"Edge extensions: {'disabled' if env_flag('REF_DOWNLOADER_DISABLE_EXTENSIONS', default=False) else 'enabled'}")
+
+        # Check Edge
+        edge_user_data = get_edge_user_data_dir()
+        edge_path = Path(edge_user_data)
+        if not edge_path.exists():
+            print(f"\nERROR: Edge user data not found at:\n  {edge_user_data}")
+            sys.exit(1)
+
+        print(f"\n{'='*60}")
+        print("  Please close Microsoft Edge completely!")
+        print("  (Playwright needs exclusive access to Edge profile)")
+        print(f"{'='*60}")
+        if not auto_mode:
+            await asyncio.to_thread(input, "  Press Enter when Edge is closed...")
+        else:
+            print("  (auto mode — skipping confirmation)")
+        print()
 
     report = []
 
