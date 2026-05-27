@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Auto-asset async download queue (infrastructure only)
+
+- New async queue dedicated to publisher-hosted binary SI assets
+  (zip / docx / mp4 / xlsx / ...). Sibling infrastructure to the
+  v0.3.0 `auto_manual_retry` queue, but specialized for binary downloads
+  that Playwright's request pipe stalls on (Elsevier ARS, Wiley
+  `downloadSupplement`, etc.).
+- Two-tier download fallback (`download_asset_via_curl` →
+  `download_asset_via_urllib`): curl for fast streaming on Windows when
+  available, urllib with per-chunk stall detection as fallback. Both bypass
+  Playwright entirely for the actual byte transfer.
+- 10 new queue helpers, all gated on `RUN_CTX["auto_asset_tasks"]`:
+  `get_auto_asset_sem`, `push_auto_asset_result`,
+  `run_auto_asset_download_item`, `auto_asset_download_worker`,
+  `materialize_auto_asset_result`, `collect_auto_asset_download_tasks`,
+  `collect_auto_asset_download_results`, `schedule_auto_asset_download`,
+  `drain_auto_asset_downloads`, `cancel_auto_asset_downloads`.
+- Tunables (all env-var overridable):
+  `AUTO_ASSET_DOWNLOAD_MAX_CONCURRENT=3`,
+  `AUTO_ASSET_DOWNLOAD_MAX_PENDING=8`,
+  `AUTO_ASSET_FINAL_DRAIN_TIMEOUT=180_000`. Plus 8 Elsevier-asset timing
+  constants (`ELSEVIER_ASSET_CURL_*`, `ELSEVIER_ASSET_URLLIB_*`) and a
+  shared `BINARY_ASSET_USER_AGENT` string.
+- `restart_edge_context` now cancels both queues (manual_retry + asset)
+  before relaunching Edge, so retries don't fire against a dead context.
+- `main()` drains the asset queue at three points in auto-mode: before
+  each `download_one`, after each `download_one`, and end-of-run (with
+  `wait=True`). All three are no-ops until a follow-up commit wires
+  `schedule_auto_asset_download` into the SI capture path.
+- Behavior is **completely unchanged** for users: no scheduler currently
+  calls `schedule_auto_asset_download`, so the queue stays empty. This
+  commit is preparatory infrastructure; the SI rework lands separately.
+
+### Changed
+
+- `url_asset_extension(url)` now also recovers the extension from common
+  query-string filename keys (`file`, `filename`, `name`, `download`,
+  `attachment`). Needed so the asset queue can correctly classify Wiley
+  `/doi/.../downloadSupplement?file=foo.docx`-style URLs whose path has
+  no extension.
+
 ### Added — CloakBrowser backend (optional)
 
 - New alternative browser backend: set `REF_DOWNLOADER_BROWSER=cloak` to drive

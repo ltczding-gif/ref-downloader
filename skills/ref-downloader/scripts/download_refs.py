@@ -40,12 +40,15 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 from playwright.async_api import BrowserContext, Page, async_playwright, Error as PlaywrightError
 
@@ -156,6 +159,31 @@ AUTO_MANUAL_RETRY_TIMEOUT = 20_000
 AUTO_MANUAL_RETRY_MAX_CONCURRENT = 3
 AUTO_MANUAL_RETRY_MAX_PENDING = 8
 AUTO_MANUAL_FINAL_DRAIN_TIMEOUT = 25_000
+
+# Auto-asset queue (binary SI files: zip/docx/mp4/etc). Sibling to AUTO_MANUAL_RETRY
+# but specialized for publisher-hosted binary assets that Playwright cannot stream
+# reliably (Elsevier ARS, Wiley downloadSupplement). The queue stays a no-op until
+# a future commit wires it into the SI capture paths.
+AUTO_ASSET_DOWNLOAD_MAX_CONCURRENT = int(os.environ.get("REF_DOWNLOADER_AUTO_ASSET_MAX_CONCURRENT", "3"))
+AUTO_ASSET_DOWNLOAD_MAX_PENDING = int(os.environ.get("REF_DOWNLOADER_AUTO_ASSET_MAX_PENDING", "8"))
+AUTO_ASSET_FINAL_DRAIN_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_AUTO_ASSET_FINAL_DRAIN_TIMEOUT_MS", "180000"))
+
+# Asset download tuning (used by download_asset_via_curl / download_asset_via_urllib).
+# Defaults biased toward "publisher serves the asset eventually but slowly" rather
+# than aggressive timeouts that abandon legitimate downloads.
+ELSEVIER_ASSET_CURL_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_CURL_TIMEOUT_MS", "180000"))
+ELSEVIER_ASSET_CURL_CONNECT_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_CURL_CONNECT_TIMEOUT_MS", "10000"))
+ELSEVIER_ASSET_CURL_SPEED_LIMIT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_CURL_SPEED_LIMIT_BPS", "2048"))
+ELSEVIER_ASSET_CURL_SPEED_TIME = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_CURL_SPEED_TIME_S", "30"))
+ELSEVIER_ASSET_URLLIB_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_URLLIB_TIMEOUT_MS", "180000"))
+ELSEVIER_ASSET_URLLIB_SOCKET_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_URLLIB_SOCKET_TIMEOUT_MS", "15000"))
+ELSEVIER_ASSET_URLLIB_STALL_TIMEOUT = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_URLLIB_STALL_TIMEOUT_MS", "30000"))
+ELSEVIER_ASSET_URLLIB_PROGRESS_BYTES = int(os.environ.get("REF_DOWNLOADER_ELSEVIER_ASSET_URLLIB_PROGRESS_BYTES", str(5 * 1024 * 1024)))
+BINARY_ASSET_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
+)
 PDF_JS_FETCH_TIMEOUT = 20_000
 GENERIC_POPUP_TIMEOUT = 3_500
 MANUAL_QUEUE_LIMIT_DEFAULT = 3
@@ -294,6 +322,12 @@ RUN_CTX: Dict[str, Any] = {
     "auto_manual_tasks": set(),
     "auto_manual_results": [],
     "auto_manual_sem": None,
+    # Auto-asset queue: parallel infrastructure to auto_manual_* above, dedicated
+    # to publisher-hosted binary SI downloads. Stays empty until a future commit
+    # wires in schedule_auto_asset_download from the SI capture path.
+    "auto_asset_tasks": set(),
+    "auto_asset_results": [],
+    "auto_asset_sem": None,
     "manual_deferred": False,
     "current_ref": None,
     "round_id": None,
@@ -346,8 +380,12 @@ def current_ref_meta() -> Dict[str, Any]:
     }
 
 
-def make_attempt(state: str, reason: str = "", size_kb: Optional[int] = None) -> Dict[str, Any]:
-    return {"state": state, "reason": reason, "size_kb": size_kb}
+def make_attempt(state: str, reason: str = "", size_kb: Optional[int] = None, **extra: Any) -> Dict[str, Any]:
+    """Build an attempt dict. `**extra` carries diagnostic fields the queue
+    helpers attach (curl_exit, http_status, error, content_length, etc) — they
+    end up in events.jsonl when the attempt is logged.
+    """
+    return {"state": state, "reason": reason, "size_kb": size_kb, **extra}
 
 
 async def response_body_with_timeout(resp, timeout_ms: int = RESPONSE_BODY_TIMEOUT):
@@ -1235,6 +1273,195 @@ async def cancel_auto_manual_retries(reason: str, report: Optional[List[Dict[str
     collect_auto_manual_tasks()
     if report is not None:
         collect_auto_manual_retry_results(report)
+
+
+# ── Auto-asset queue ──────────────────────────────────────────────────────────
+# Sibling infrastructure to auto_manual_retry above, dedicated to publisher-hosted
+# binary SI assets (zip / docx / mp4 / xlsx ...) that Playwright's request pipe
+# stalls on. Currently no scheduler calls schedule_auto_asset_download — that wire-in
+# lands with the SI capture rework in a later commit. Until then the queue stays
+# empty and the drain points in main() / restart_edge_context are no-ops.
+
+def get_auto_asset_sem() -> asyncio.Semaphore:
+    sem = RUN_CTX.get("auto_asset_sem")
+    if sem is None:
+        sem = asyncio.Semaphore(AUTO_ASSET_DOWNLOAD_MAX_CONCURRENT)
+        RUN_CTX["auto_asset_sem"] = sem
+    return sem
+
+
+def push_auto_asset_result(item: Dict[str, Any], attempt: Dict[str, Any]):
+    if item.get("result_pushed"):
+        return
+    item["result_pushed"] = True
+    RUN_CTX.setdefault("auto_asset_results", []).append(
+        {
+            "ref": dict(item.get("ref") or {}),
+            "stage": item.get("stage") or "si",
+            "url": item.get("url") or "",
+            "dest": str(item.get("dest") or ""),
+            "attempt": dict(attempt),
+        }
+    )
+
+
+async def run_auto_asset_download_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    url = item.get("url") or ""
+    dest = Path(item.get("dest") or "")
+    ext = item.get("ext") or dest.suffix or ".bin"
+    stage = item.get("stage") or "si"
+    ref = item.get("ref") or {}
+    token = CURRENT_REF.set(ref)
+    try:
+        timeout_ms = int(item.get("timeout_ms") or ELSEVIER_ASSET_CURL_TIMEOUT)
+        log_event(stage, "auto_asset_curl_get", "start", url, f"timeout_ms={timeout_ms}")
+        attempt = await asyncio.to_thread(download_asset_via_curl, url, dest, ext, timeout_ms)
+        if attempt["state"] == STATUS_DOWNLOADED:
+            log_event(stage, "auto_asset_curl_get", STATUS_DOWNLOADED, url, f"{ext} {attempt.get('size_kb') or 0} KB")
+            return attempt
+
+        log_event(stage, "auto_asset_curl_get", STATUS_FAILED, url, attempt.get("reason", "asset_curl_fetch_failed"))
+        fallback_timeout = int(item.get("fallback_timeout_ms") or ELSEVIER_ASSET_URLLIB_TIMEOUT)
+        log_event(stage, "auto_asset_urllib_get", "start", url, f"timeout_ms={fallback_timeout}")
+        fallback = await asyncio.to_thread(download_asset_via_urllib, url, dest, ext, fallback_timeout)
+        if fallback["state"] == STATUS_DOWNLOADED:
+            log_event(stage, "auto_asset_urllib_get", STATUS_DOWNLOADED, url, f"{ext} {fallback.get('size_kb') or 0} KB")
+        else:
+            log_event(stage, "auto_asset_urllib_get", STATUS_FAILED, url, fallback.get("reason", "asset_urllib_fetch_failed"))
+        return fallback
+    finally:
+        CURRENT_REF.reset(token)
+
+
+async def auto_asset_download_worker(item: Dict[str, Any]):
+    stage = item.get("stage") or "si"
+    ref = item.get("ref") or {}
+    token = CURRENT_REF.set(ref)
+    attempt = make_attempt(STATUS_FAILED, "auto_asset_not_run")
+    try:
+        async with get_auto_asset_sem():
+            attempt = await run_auto_asset_download_item(item)
+    except asyncio.CancelledError:
+        attempt = make_attempt(STATUS_MANUAL, "auto_asset_cancelled")
+        log_event(stage, "auto_asset_cancelled", STATUS_MANUAL, item.get("url") or "", "cancelled")
+        raise
+    except Exception as e:
+        attempt = make_attempt(STATUS_FAILED, "auto_asset_exception", error=str(e)[:160])
+        log_event(stage, "auto_asset_exception", STATUS_FAILED, item.get("url") or "", str(e)[:160])
+    finally:
+        push_auto_asset_result(item, attempt)
+        CURRENT_REF.reset(token)
+
+
+def materialize_auto_asset_result(report: List[Dict[str, Any]], result: Dict[str, Any]):
+    ref = result.get("ref") or {}
+    if not ref.get("id"):
+        return
+    stage = result.get("stage") or "si"
+    attempt = result.get("attempt") or make_attempt(STATUS_FAILED, "auto_asset_missing_result")
+    status_key = "pdf_status" if stage == "main_pdf" else "si_status"
+    history_key = "pdf_history" if stage == "main_pdf" else "si_history"
+
+    row = None
+    for existing in report:
+        if int(existing.get("id") or 0) == int(ref["id"]):
+            row = existing
+            break
+    if row is None:
+        return
+
+    current_status = row.get(status_key) or ""
+    if any(token in current_status for token in ("downloaded", "already_exists", "non_pdf_asset_saved")):
+        return
+    if attempt.get("state") == STATUS_DOWNLOADED:
+        if attempt.get("reason") == "non_pdf_asset_saved":
+            row[status_key] = f"non_pdf_asset_saved ({attempt.get('asset_ext', '')}, {attempt.get('size_kb') or 0} KB)"
+        else:
+            row[status_key] = f"downloaded ({attempt.get('size_kb') or 0} KB)"
+    else:
+        row[status_key] = f"failed (auto_asset:{attempt.get('reason') or 'unknown'})"
+    row[history_key] = append_history_text(row.get(history_key, ""), row[status_key])
+
+
+def collect_auto_asset_download_tasks():
+    tasks = RUN_CTX.setdefault("auto_asset_tasks", set())
+    done = {task for task in tasks if task.done()}
+    tasks.difference_update(done)
+    for task in done:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log_event("auto_asset_queue", "task_result", STATUS_FAILED, "", str(e)[:120])
+
+
+def collect_auto_asset_download_results(report: List[Dict[str, Any]]):
+    collect_auto_asset_download_tasks()
+    results = RUN_CTX.get("auto_asset_results") or []
+    RUN_CTX["auto_asset_results"] = []
+    for result in results:
+        materialize_auto_asset_result(report, result)
+
+
+async def schedule_auto_asset_download(url: str, dest_base: Path, stage: str, ref: Dict[str, Any]) -> Dict[str, Any]:
+    """Queue a binary asset download to run asynchronously. Currently unused —
+    SI capture paths still take the synchronous route. Will be wired in by a
+    follow-up commit; defined here so the rest of the queue can compile and be
+    drain-safe.
+    """
+    tasks = {task for task in RUN_CTX.get("auto_asset_tasks", set()) if not task.done()}
+    if len(tasks) >= AUTO_ASSET_DOWNLOAD_MAX_PENDING:
+        log_event(stage, "auto_asset_rejected", STATUS_FAILED, url, f"queue_full max_pending={AUTO_ASSET_DOWNLOAD_MAX_PENDING}")
+        return make_attempt(STATUS_FAILED, "auto_asset_queue_full")
+
+    ext = url_asset_extension(url) or ".bin"
+    item = {
+        "url": url,
+        "dest": dest_base.with_suffix(ext),
+        "ext": ext,
+        "stage": stage,
+        "ref": dict(ref),
+        "timeout_ms": max(DL_TIMEOUT, ELSEVIER_ASSET_CURL_TIMEOUT),
+        "fallback_timeout_ms": ELSEVIER_ASSET_URLLIB_TIMEOUT,
+    }
+    task = asyncio.create_task(auto_asset_download_worker(item))
+    RUN_CTX.setdefault("auto_asset_tasks", set()).add(task)
+    log_event(stage, "auto_asset_scheduled", STATUS_MANUAL, url, f"{ext} max_concurrent={AUTO_ASSET_DOWNLOAD_MAX_CONCURRENT}")
+    return make_attempt(STATUS_MANUAL, "auto_asset_scheduled", auto_asset_scheduled=True)
+
+
+async def drain_auto_asset_downloads(report: Optional[List[Dict[str, Any]]] = None, *, wait: bool = False):
+    if wait:
+        tasks = {task for task in RUN_CTX.get("auto_asset_tasks", set()) if not task.done()}
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=AUTO_ASSET_FINAL_DRAIN_TIMEOUT / 1000)
+            if pending:
+                log_event(
+                    "auto_asset_queue",
+                    "final_drain",
+                    STATUS_MANUAL,
+                    "",
+                    f"timeout_ms={AUTO_ASSET_FINAL_DRAIN_TIMEOUT} cancelling={len(pending)}",
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=5.0)
+    collect_auto_asset_download_tasks()
+    if report is not None:
+        collect_auto_asset_download_results(report)
+
+
+async def cancel_auto_asset_downloads(reason: str, report: Optional[List[Dict[str, Any]]] = None):
+    tasks = {task for task in RUN_CTX.get("auto_asset_tasks", set()) if not task.done()}
+    if tasks:
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks, timeout=5.0)
+        log_event("auto_asset_queue", "cancel", STATUS_MANUAL, "", f"cancelled={len(tasks)} reason={reason[:80]}")
+    collect_auto_asset_download_tasks()
+    if report is not None:
+        collect_auto_asset_download_results(report)
 
 
 def sync_report_with_existing_files(report: List[Dict[str, Any]], project_dir: Path):
@@ -2828,8 +3055,20 @@ async def try_direct_pdf(
 
 
 def url_asset_extension(url: str) -> str:
-    ext = Path(urlparse(url or "").path).suffix.lower()
-    return ext[:12]
+    parsed = urlparse(url or "")
+    ext = Path(unquote(parsed.path)).suffix.lower()
+    if ext:
+        return ext[:12]
+    # Wiley `/doi/.../downloadSupplement?file=...docx` paths carry the real
+    # filename in the query string; the path itself has no extension. Same
+    # pattern shows up for some Elsevier / Springer download endpoints.
+    query = parse_qs(parsed.query)
+    for key in ("file", "filename", "name", "download", "attachment"):
+        for value in query.get(key) or []:
+            ext = Path(unquote(value)).suffix.lower()
+            if ext:
+                return ext[:12]
+    return ""
 
 
 def is_non_pdf_asset_url(url: str) -> bool:
@@ -2842,6 +3081,180 @@ def body_looks_like_html(body: bytes) -> bool:
     if "<html" in head or "<!doctype" in head:
         return True
     return any(t in head for t in _auth_page_titles())
+
+
+def finalize_streamed_asset(tmp: Path, dest: Path, ext: str) -> Dict[str, Any]:
+    """Validate a freshly-streamed binary asset and move it into place.
+
+    Returns a `downloaded` attempt on success, or a `failed` attempt with a
+    reason explaining what went wrong (empty file, HTML body sneaking past
+    Content-Type checks, etc).
+    """
+    if not tmp.exists() or tmp.stat().st_size <= 0:
+        return make_attempt(STATUS_FAILED, "asset_stream_empty")
+    try:
+        with tmp.open("rb") as f:
+            head = f.read(2048)
+    except Exception:
+        head = b""
+    if body_looks_like_html(head):
+        return make_attempt(STATUS_FAILED, "asset_stream_not_asset")
+    tmp.replace(dest)
+    kb = max(1, dest.stat().st_size // 1024)
+    return {
+        "state": STATUS_DOWNLOADED,
+        "reason": "non_pdf_asset_saved",
+        "size_kb": kb,
+        "asset_ext": ext,
+        "asset_path": str(dest),
+    }
+
+
+def download_asset_via_curl(url: str, dest: Path, ext: str, timeout_ms: int) -> Dict[str, Any]:
+    """Stream a binary asset via the system curl. Used for Elsevier ARS-style URLs
+    where Playwright's request pipe stalls on long downloads. Returns a `failed`
+    attempt with `asset_curl_missing` if no curl is on PATH (caller should fall
+    through to `download_asset_via_urllib`).
+    """
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        return make_attempt(STATUS_FAILED, "asset_curl_missing")
+
+    timeout_s = max(1, int((timeout_ms + 999) / 1000))
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        cmd = [
+            curl,
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout_s),
+            "--connect-timeout",
+            str(max(1, int((ELSEVIER_ASSET_CURL_CONNECT_TIMEOUT + 999) / 1000))),
+            "--speed-limit",
+            str(max(1, ELSEVIER_ASSET_CURL_SPEED_LIMIT)),
+            "--speed-time",
+            str(max(1, ELSEVIER_ASSET_CURL_SPEED_TIME)),
+            "-A",
+            BINARY_ASSET_USER_AGENT,
+            "-H",
+            "Referer: https://www.sciencedirect.com/",
+            "-o",
+            str(tmp),
+            url,
+        ]
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s + 5,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            return make_attempt(STATUS_FAILED, "asset_curl_fetch_failed", curl_exit=completed.returncode, detail=detail[:160])
+        return finalize_streamed_asset(tmp, dest, ext)
+    except subprocess.TimeoutExpired:
+        return make_attempt(STATUS_FAILED, "asset_curl_timeout")
+    except OSError as e:
+        return make_attempt(STATUS_FAILED, "asset_curl_fetch_failed", error=str(e)[:160])
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+
+def download_asset_via_urllib(url: str, dest: Path, ext: str, timeout_ms: int) -> Dict[str, Any]:
+    """Stream publisher-hosted binary assets when Playwright's request pipe stalls.
+
+    Used as the fallback path when curl is not available, or as the primary path
+    when curl is unsuitable. Streams in 256 KB chunks with a per-chunk stall
+    timeout to avoid hanging indefinitely on a stuck connection.
+    """
+    total_timeout_s = max(1, timeout_ms / 1000)
+    socket_timeout_s = max(1, min(total_timeout_s, ELSEVIER_ASSET_URLLIB_SOCKET_TIMEOUT / 1000))
+    stall_timeout_s = max(socket_timeout_s, ELSEVIER_ASSET_URLLIB_STALL_TIMEOUT / 1000)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    headers = {
+        "User-Agent": BINARY_ASSET_USER_AGENT,
+        "Accept": "*/*",
+        "Referer": "https://www.sciencedirect.com/",
+    }
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        req = Request(url, headers=headers)
+        deadline = time.monotonic() + total_timeout_s
+        with urlopen(req, timeout=socket_timeout_s) as resp:
+            status = int(getattr(resp, "status", 200) or 200)
+            content_type = resp.headers.get("content-type", "")
+            content_length = resp.headers.get("content-length", "")
+            first = resp.read(2048)
+            if not first or body_looks_like_html(first):
+                return make_attempt(
+                    STATUS_FAILED,
+                    "asset_urllib_not_asset",
+                    http_status=status,
+                    content_type=content_type,
+                )
+            with tmp.open("wb") as f:
+                f.write(first)
+                bytes_written = len(first)
+                last_progress = time.monotonic()
+                next_progress_log = max(ELSEVIER_ASSET_URLLIB_PROGRESS_BYTES, bytes_written)
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        return make_attempt(
+                            STATUS_FAILED,
+                            "asset_urllib_total_timeout",
+                            bytes_kb=max(1, bytes_written // 1024),
+                            timeout_ms=timeout_ms,
+                            content_length=content_length,
+                        )
+                    if now - last_progress >= stall_timeout_s:
+                        return make_attempt(
+                            STATUS_FAILED,
+                            "asset_urllib_stall_timeout",
+                            bytes_kb=max(1, bytes_written // 1024),
+                            timeout_ms=int(stall_timeout_s * 1000),
+                            content_length=content_length,
+                        )
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+                    last_progress = time.monotonic()
+                    if bytes_written >= next_progress_log:
+                        log_event(
+                            "si",
+                            "asset_urllib_progress",
+                            "progress",
+                            url,
+                            f"{bytes_written // 1024} KB total={content_length or '?'}",
+                        )
+                        next_progress_log += ELSEVIER_ASSET_URLLIB_PROGRESS_BYTES
+        return finalize_streamed_asset(tmp, dest, ext)
+    except HTTPError as e:
+        return make_attempt(STATUS_FAILED, "asset_urllib_http_error", http_status=e.code)
+    except TimeoutError:
+        return make_attempt(STATUS_FAILED, "asset_urllib_socket_timeout")
+    except (URLError, OSError) as e:
+        return make_attempt(STATUS_FAILED, "asset_urllib_fetch_failed", error=str(e)[:160])
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def find_existing_si_asset(base: Path) -> Optional[Path]:
@@ -4166,6 +4579,7 @@ async def close_context_quietly(ctx: Optional[BrowserContext]):
 
 async def restart_edge_context(pw, ctx: Optional[BrowserContext], reason: str, ref: Optional[Dict[str, Any]] = None) -> BrowserContext:
     await cancel_auto_manual_retries(f"session_restart: {reason[:120]}")
+    await cancel_auto_asset_downloads(f"session_restart: {reason[:120]}")
     clear_manual_queue(f"session_restart: {reason[:120]}")
     await close_context_quietly(ctx)
     await asyncio.sleep(1.0)
@@ -4268,6 +4682,7 @@ async def main():
                         ctx = await restart_edge_context(pw, ctx, err_msg, ref)
                     else:
                         raise
+                await drain_auto_asset_downloads(report, wait=False)
 
             while True:
                 try:
@@ -4313,6 +4728,7 @@ async def main():
                         ctx = await restart_edge_context(pw, ctx, err_msg, ref)
                     else:
                         raise
+                await drain_auto_asset_downloads(report, wait=False)
 
             if not auto_mode:
                 try:
@@ -4369,6 +4785,7 @@ async def main():
                     log_event("auto_manual_queue", "drain", "session_closed_final", "", err_msg)
                 else:
                     raise
+            await drain_auto_asset_downloads(report, wait=True)
 
         await close_context_quietly(ctx)
 
