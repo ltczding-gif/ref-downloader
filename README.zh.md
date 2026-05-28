@@ -3,7 +3,7 @@
 > **别再花一下午追几十篇参考文献 PDF。**
 > 输入一个 DOI，全部参考文献自动到手——用你已有的机构访问权。
 
-[![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-orange.svg)](CHANGELOG.md)
+[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-orange.svg)](CHANGELOG.md)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#已知限制)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -11,7 +11,7 @@
 
 [English full version](README.md)
 
-> **状态：beta (v0.3.0)。** 仅在 Windows + Microsoft Edge 验证过。macOS / Linux / Chromium 未测试。SI 下载和出版商页面变动是当前最容易出问题的地方。欢迎提 issue / PR。
+> **状态：beta (v0.4.0)。** 仅在 Windows + Microsoft Edge 验证过。macOS / Linux / Chromium 未测试。SI 下载和出版商页面变动是当前最容易出问题的地方。欢迎提 issue / PR。
 
 > **重要——不是付费墙绕过工具。** ref-downloader 用的是 _你_ 的机构访问权。如果你的学校/单位订阅了某期刊，那条参考文献就能下；如果没订阅，那条会标 `manual_pending` 等你手动跟进。
 

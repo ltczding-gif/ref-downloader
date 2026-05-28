@@ -3,7 +3,7 @@
 > **Stop losing an afternoon to chasing dozens of reference PDFs by hand.**
 > One DOI in, every reference PDF out — using your existing institutional access.
 
-[![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-orange.svg)](CHANGELOG.md)
+[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-orange.svg)](CHANGELOG.md)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#known-limitations)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -11,7 +11,7 @@
 
 [中文完整文档 / Full Chinese version](README.zh.md)
 
-> **Status: beta (v0.3.0).** Windows + Microsoft Edge verified path. macOS / Linux / Chromium untested. Expect rough edges around supplementary downloads and publisher-site changes. PR-worthy issues welcome.
+> **Status: beta (v0.4.0).** Windows + Microsoft Edge verified path. macOS / Linux / Chromium untested. Expect rough edges around supplementary downloads and publisher-site changes. PR-worthy issues welcome.
 
 > **Heads up — not a paywall bypass.** ref-downloader uses _your_ institutional access. If your university or organization subscribes to a journal, those refs work. If they don't, those refs become `manual_pending` for you to follow up on by hand.
 

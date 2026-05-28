@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-05-28
+
+Tranched merge of improvements from the maintainer's working copy. Five
+focused commits, all already pushed before this version bump:
+
+- **Commit A (`661e41c`)** — Optional CloakBrowser stealth Chromium backend
+  for Cloudflare-heavy sites. Opt-in via `REF_DOWNLOADER_BROWSER=cloak`.
+- **Commit B (`e20514c`)** — Auto-asset async download queue infrastructure
+  for binary SI files (zip/docx/mp4/...). Dead code in this release; gets
+  wired in by the v0.5 SI capture rework.
+- **Commit C (`0c1d1a3`)** — Elsevier strengthening: 11 new PII / SI / URL
+  helpers (mostly dead code) + `ELSEVIER_TRANSIENT_POPUP_REASONS` widened
+  to 5 (active change — fewer false `manual_pending (elsevier_*)` refs).
+- **Commit D (`bf00d0e`)** — `--fail-fast` mode for CI / batch runs.
+  Terminates run after first actionable unresolved ref.
+- **Commit E (`e500ce0`)** — CCS Chemistry publisher (`10.31635` →
+  `ccs`), APS direct PDF URL wire-in (bypasses landing page for 9 APS
+  journals), `[user].verified_no_si_dois` config section.
+
+The dead-code helpers from Commits B and C are intentional staging for
+the v0.5 SI capture refactor; documented as "Deferred to v0.5" below.
 
 ### Added — CCS Chemistry publisher + APS direct URL + `[user]` config section
 
