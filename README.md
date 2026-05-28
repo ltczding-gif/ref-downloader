@@ -228,12 +228,18 @@ See [`skills/ref-downloader/config.example.toml`](skills/ref-downloader/config.e
 
 ### Alternative backend: CloakBrowser (optional, for Cloudflare-heavy sites)
 
-By default the script drives Microsoft Edge. For sites that block ordinary Playwright (Cloudflare Turnstile, Radware, persistent `Just a moment` / security-verification pages), swap in [cloakbrowser](https://pypi.org/project/cloakbrowser/) — a stealth Chromium with humanized input:
+**What it is.** [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) is a third-party Python package by CloakHQ (MIT-licensed, available on [PyPI](https://pypi.org/project/cloakbrowser/) as `cloakbrowser`). It ships a patched Chromium build with source-level anti-fingerprint changes designed to look like a normal browser to common bot-detection layers (Cloudflare Turnstile, Radware, DataDome, FingerprintJS, etc). Its `launch_persistent_context_async()` API is intentionally compatible with Playwright's — that's what lets ref-downloader swap backends with a single env var instead of rewriting the download flow.
+
+**Not a dependency of ref-downloader.** If you don't run `pip install cloakbrowser` it's never imported. The default Edge backend is unchanged. When CloakBrowser IS the active backend, ref-downloader uses Chromium under a **separate persistent profile** at `~/.local/cloakbrowser/profiles/ref-downloader` (or `REF_DOWNLOADER_CLOAK_PROFILE`), so your Edge profile is not touched — Edge does NOT need to be closed.
+
+**When to use it.** Sites you'd reach for it on: CCS Chemistry (`10.31635`, Cloudflare-protected), some Elsevier paths gated by Radware, anything where the Edge backend keeps producing `manual_pending (radware_bot_manager)` or `failed (challenge_timeout)`. **Don't** reach for it as a default — the Edge backend is more reliable when your institutional access is the actual bottleneck, because Edge carries your authenticated cookies.
+
+**Caveats.** CloakBrowser is **beta** third-party software; install + use at your own discretion (review its [repo](https://github.com/CloakHQ/CloakBrowser) before pulling it). It is **not a captcha solver** — interactive challenges still need you. It also does not carry your institutional cookies (separate profile), so it's most useful for open-Cloudflare sites, less useful for paywalled-but-license-covered refs.
 
 ```powershell
-pip install cloakbrowser
+pip install cloakbrowser                              # one-time, separate from ref-downloader
 $env:REF_DOWNLOADER_BROWSER = "cloak"
-$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"     # optional: slower mouse/scroll
+$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"    # optional: slower mouse/scroll
 python skills/ref-downloader/scripts/run_ref_downloader.py 10.31635/ccsorg...
 ```
 

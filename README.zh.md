@@ -228,12 +228,18 @@ python <SKILL_DIR>/scripts/run_ref_downloader.py 10.1021/jacs.5c05017 --config .
 
 ### 备用后端：CloakBrowser（可选，应对 Cloudflare 类站点）
 
-默认走 Microsoft Edge。如果某些站点持续把 Playwright 拦下（Cloudflare Turnstile、Radware、持续显示 `Just a moment` / 正在进行安全验证），可以切换到 [cloakbrowser](https://pypi.org/project/cloakbrowser/) —— 一个带人化输入的隐身 Chromium：
+**它是什么。** [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) 是 CloakHQ 维护的第三方 Python 包（MIT 协议，[PyPI 上有](https://pypi.org/project/cloakbrowser/)，包名 `cloakbrowser`）。它打包了一个魔改过的 Chromium，从源码层面改了一系列指纹特征，让常见的反爬检测（Cloudflare Turnstile、Radware、DataDome、FingerprintJS 等）看不出是自动化浏览器。它的 `launch_persistent_context_async()` API 故意跟 Playwright 兼容 —— 所以 ref-downloader 切后端只需要一个环境变量，不用改下载流程。
+
+**不是 ref-downloader 的依赖。** 不 `pip install cloakbrowser` 它就不会被 import，默认的 Edge 路径完全不受影响。启用后 ref-downloader 用 cloakbrowser 自带的 Chromium，并使用**独立的 profile 目录**（默认 `~/.local/cloakbrowser/profiles/ref-downloader`，或用 `REF_DOWNLOADER_CLOAK_PROFILE` 覆盖），不会动你的 Edge profile —— Edge **不需要**关闭。
+
+**什么时候用。** 适合的场景：CCS Chemistry（`10.31635`，Cloudflare 保护）、部分被 Radware 拦的 Elsevier 路径、Edge 后端持续出 `manual_pending (radware_bot_manager)` 或 `failed (challenge_timeout)` 的页面。**不要**当默认 —— 如果瓶颈是机构访问权，Edge 后端反而更可靠（它带你登录过的 cookie）。
+
+**注意事项。** CloakBrowser 当前是 **beta** 第三方软件，是否安装请自己判断（建议先看一眼 [repo](https://github.com/CloakHQ/CloakBrowser)）。它**不是验证码自动求解器**，交互式验证还是要人。另外它的 profile 独立 ≠ 没有你机构 cookie，所以适合开放的 Cloudflare 站，对"付费但你机构有权限"的文章帮助有限。
 
 ```powershell
-pip install cloakbrowser
+pip install cloakbrowser                              # 一次性，跟 ref-downloader 无关
 $env:REF_DOWNLOADER_BROWSER = "cloak"
-$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"     # 可选：更慢的鼠标/滚动节奏
+$env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"    # 可选：更慢的鼠标/滚动节奏
 python skills/ref-downloader/scripts/run_ref_downloader.py 10.31635/ccsorg...
 ```
 

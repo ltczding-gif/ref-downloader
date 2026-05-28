@@ -211,16 +211,25 @@ the v0.5 SI capture refactor; documented as "Deferred to v0.5" below.
   `/doi/.../downloadSupplement?file=foo.docx`-style URLs whose path has
   no extension.
 
-### Added — CloakBrowser backend (optional)
+### Added — CloakBrowser backend (optional, third-party)
 
 - New alternative browser backend: set `REF_DOWNLOADER_BROWSER=cloak` to drive
-  [cloakbrowser](https://pypi.org/project/cloakbrowser/) instead of Microsoft Edge.
-  cloakbrowser is a stealth Chromium with humanized mouse / scroll / keyboard
-  timings — useful for Cloudflare Turnstile, Radware, and other sites that
-  detect ordinary Playwright fingerprints.
-- cloakbrowser is **not** a hard dependency. Users install it themselves
-  (`pip install cloakbrowser`); the import is lazy and only fires when the env
-  var is set.
+  [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) (third-party
+  MIT-licensed package by CloakHQ, `cloakbrowser` on
+  [PyPI](https://pypi.org/project/cloakbrowser/)) instead of Microsoft Edge.
+  cloakbrowser ships a patched Chromium build with source-level
+  anti-fingerprint changes that look like a normal browser to common
+  bot-detection layers (Cloudflare Turnstile, Radware, DataDome, etc).
+  Its `launch_persistent_context_async()` API is Playwright-compatible,
+  which is what lets ref-downloader swap backends with one env var.
+- cloakbrowser is **not** a hard dependency of ref-downloader. Users install
+  it themselves (`pip install cloakbrowser`); the import is lazy and only
+  fires when the env var is set, so users who never opt in pay zero cost.
+- The cloak backend uses its own Chromium under a separate persistent
+  profile — Edge does NOT need to be closed when running under cloak. The
+  flip side: institutional cookies are NOT carried (separate profile),
+  so the cloak backend is most useful for open-Cloudflare sites, less
+  useful for paywalled-but-licensed refs.
 - New env vars (all optional, no config-file equivalent yet):
   `REF_DOWNLOADER_BROWSER`, `REF_DOWNLOADER_CLOAK_PROFILE`,
   `REF_DOWNLOADER_CLOAK_HUMANIZE`, `REF_DOWNLOADER_CLOAK_HUMAN_PRESET`

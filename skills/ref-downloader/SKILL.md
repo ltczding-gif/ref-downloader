@@ -58,10 +58,12 @@ sequential 3-stage pipeline (`extract_refs.py` → `validate_refs.py` →
 
 ## Alternative backend: CloakBrowser (Cloudflare-heavy sites)
 
-Default backend is Microsoft Edge. For sites that keep blocking ordinary Playwright (Cloudflare Turnstile, Radware, persistent `Just a moment` / 安全验证 pages), switch to the [cloakbrowser](https://pypi.org/project/cloakbrowser/) stealth Chromium backend:
+Default backend is Microsoft Edge. For sites that keep blocking ordinary Playwright (Cloudflare Turnstile, Radware, persistent `Just a moment` / 安全验证 pages), switch to the CloakBrowser stealth Chromium backend.
+
+**What CloakBrowser is.** Third-party MIT-licensed Python package by CloakHQ ([github.com/CloakHQ/CloakBrowser](https://github.com/CloakHQ/CloakBrowser), [pypi:cloakbrowser](https://pypi.org/project/cloakbrowser/)). Ships a patched Chromium build with anti-fingerprint changes. Its `launch_persistent_context_async()` is Playwright-API-compatible, which is why ref-downloader can swap it in with one env var. **NOT a dependency of ref-downloader** — if the user doesn't `pip install cloakbrowser`, it's never imported and the default Edge path runs as normal. Beta software; user installs it at their own discretion.
 
 ```powershell
-# One-time setup
+# One-time setup (separate from ref-downloader's `pip install playwright pymupdf`)
 pip install cloakbrowser
 
 # Switch backend (env vars; no CLI flag changes)
@@ -71,12 +73,14 @@ $env:REF_DOWNLOADER_CLOAK_HUMAN_PRESET = "careful"   # optional: slower mouse/sc
 # $env:REF_DOWNLOADER_CLOAK_PROFILE = "<custom path>"  # default: ~/.local/cloakbrowser/profiles/ref-downloader
 # $env:REF_DOWNLOADER_CLOAK_PROXY = "http://..."
 # $env:REF_DOWNLOADER_CLOAK_GEOIP = "1"
+# $env:CLOAKBROWSER_PYTHONPATH = "<dev source>"      # sys.path hint if cloakbrowser is checked out, not pip-installed
 
 python "<SKILL_DIR>/scripts/download_refs.py" <PROJECT_NAME>
 ```
 
 Caveats:
 - cloakbrowser uses its **own Chromium with a separate profile** — Edge does NOT need to be closed.
+- The separate profile means your institutional cookies are NOT carried — best for open-Cloudflare sites, less useful for paywalled refs your institution licenses.
 - A fresh cloak profile may still show Cloudflare/security-verification pages on first visit; warm it manually by opening the target site once with the same `REF_DOWNLOADER_CLOAK_PROFILE` and finishing any verification before running the downloader.
 - `human_preset=careful` lowers behavior-detection trigger rates but is **not** a captcha solver.
 
