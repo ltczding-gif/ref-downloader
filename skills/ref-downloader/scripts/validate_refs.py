@@ -60,6 +60,8 @@ PUBLISHER_MAP = {
     "10.3938": "kps",
     # Beilstein Journals
     "10.3762": "beilstein",
+    # CCS Chemistry (Chinese Chemical Society — Cloudflare-protected; needs cloak backend)
+    "10.31635": "ccs",
 }
 
 # Journal name fragments → publisher overrides (more specific than DOI prefix)
@@ -85,6 +87,7 @@ JOURNAL_PUBLISHER_MAP = {
     "matter": "elsevier",
     "iop": "iop",
     "beilstein": "beilstein",
+    "ccs chemistry": "ccs",
 }
 
 # Short journal name mapping for labels

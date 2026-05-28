@@ -59,11 +59,20 @@ class InstitutionConfig:
 
 
 @dataclass
+class UserConfig:
+    # DOIs the user has personally verified to have no SI material. Refs with
+    # these DOIs get `si_status=not_applicable (verified_no_si)` instead of
+    # `not_found` — avoids the warning noise + repeated probing on re-runs.
+    verified_no_si_dois: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     crossref: CrossrefConfig = field(default_factory=CrossrefConfig)
     zotero: ZoteroConfig = field(default_factory=ZoteroConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     institution: InstitutionConfig = field(default_factory=InstitutionConfig)
+    user: UserConfig = field(default_factory=UserConfig)
     source_files: List[str] = field(default_factory=list)
 
 
@@ -133,6 +142,7 @@ def _build_from_dict(data: dict, source_files: List[str]) -> Config:
     zotero = _coerce_section(data, "zotero")
     browser = _coerce_section(data, "browser")
     institution = _coerce_section(data, "institution")
+    user = _coerce_section(data, "user")
     return Config(
         crossref=CrossrefConfig(
             mailto=str(crossref.get("mailto", PLACEHOLDER_MAILTO)),
@@ -150,6 +160,9 @@ def _build_from_dict(data: dict, source_files: List[str]) -> Config:
             auth_page_titles=_coerce_str_list(institution, "auth_page_titles", "institution"),
             auth_loading_titles=_coerce_str_list(institution, "auth_loading_titles", "institution"),
             ignored_access_dois=_coerce_str_list(institution, "ignored_access_dois", "institution"),
+        ),
+        user=UserConfig(
+            verified_no_si_dois=_coerce_str_list(user, "verified_no_si_dois", "user"),
         ),
         source_files=source_files,
     )

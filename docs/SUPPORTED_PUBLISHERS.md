@@ -30,6 +30,7 @@ download strategy used for each, and the maturity tier.
 | `10.1146` | `annualreviews` | Annual Reviews |
 | `10.3938` | `kps` | Korean Physical Society |
 | `10.3762` | `beilstein` | Beilstein Journals |
+| `10.31635` | `ccs` | CCS Chemistry (Chinese Chemical Society) — Cloudflare-protected, needs `REF_DOWNLOADER_BROWSER=cloak` for reliable access |
 
 Journal-name fragments give an additional override path for cases where the
 DOI prefix is shared by multiple imprints (see `JOURNAL_PUBLISHER_MAP` in
@@ -70,10 +71,11 @@ The flow is:
 
 | Publisher | Note |
 |---|---|
-| `aps` | Physical Review pages have unusual JS-driven navigation |
+| `aps` | Physical Review — `direct_pdf_url` now constructs `journals.aps.org/<slug>/pdf/<doi>` for 9 APS journals (PhysRevB, PhysRevLett, RevModPhys, etc) via `aps_pdf_url_from_doi`, bypassing the JS-driven landing page. Non-listed APS journals (e.g. niche subseries) still fall through to the article-page flow. |
 | `annualreviews` | `href="#"` links that JS-open viewer/popup; covered by the popup hotpath but fragile |
 | `tandfonline` | Taylor & Francis; relies on the generic flow |
 | `beilstein` | Open-access; usually works via direct URL |
+| `ccs` | CCS Chemistry (Chinese Chemical Society) — site sits behind Cloudflare. Generic flow may be blocked; use `REF_DOWNLOADER_BROWSER=cloak` for reliable access. SI capture not yet specialized. |
 
 ### `specialized but weakly validated`
 

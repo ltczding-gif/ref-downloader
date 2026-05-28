@@ -278,7 +278,7 @@ Agent users can install or inspect the packaged skill at [`skills/ref-downloader
 
 ## Supported publishers
 
-ACS, Nature, Science, Elsevier, Wiley, RSC, Springer, PNAS, ECS, IOP, AIP, AVS, IEEE, OSA, KPS, Beilstein, APS, Annual Reviews, Taylor & Francis. Maturity varies — see [`docs/SUPPORTED_PUBLISHERS.md`](docs/SUPPORTED_PUBLISHERS.md) for the per-publisher tier table and known issues.
+ACS, Nature, Science, Elsevier, Wiley, RSC, Springer, PNAS, ECS, IOP, AIP, AVS, IEEE, OSA, KPS, Beilstein, APS, Annual Reviews, Taylor & Francis, CCS Chemistry. Maturity varies — see [`docs/SUPPORTED_PUBLISHERS.md`](docs/SUPPORTED_PUBLISHERS.md) for the per-publisher tier table and known issues. CCS Chemistry sits behind Cloudflare; pair it with `REF_DOWNLOADER_BROWSER=cloak` for reliable access.
 
 ## Known limitations
 

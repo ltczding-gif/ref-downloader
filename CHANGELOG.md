@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — CCS Chemistry publisher + APS direct URL + `[user]` config section
+
+- **CCS Chemistry** (Chinese Chemical Society) recognized as a publisher key:
+  - `validate_refs.py` PUBLISHER_MAP: `10.31635` → `ccs`
+  - `validate_refs.py` JOURNAL_PUBLISHER_MAP: `"ccs chemistry"` → `ccs`
+  - `download_refs.py` PUBLISHER_STRATEGIES: `"ccs"` entry (generic_fallback,
+    weak — `cloudflare_blocked_official_route`). The site sits behind
+    Cloudflare; use `REF_DOWNLOADER_BROWSER=cloak` for reliable access.
+  - `docs/SUPPORTED_PUBLISHERS.md`: new prefix row + operational note.
+  - Pytest coverage: prefix + journal-name fallback both asserted.
+
+- **APS direct PDF URL** wire-in: `direct_pdf_url()` now calls
+  `aps_pdf_url_from_doi(doi)` (from Commit C) for `publisher=="aps"` before
+  falling through. For 9 APS journals (PhysRevB, PhysRevLett, RevModPhys,
+  PhysRevA/C/D/E/Materials/X) this bypasses the JS-driven landing page
+  entirely. Non-listed APS journals still go through the article-page flow.
+
+- **`[user]` config section** in `config.local.toml`:
+  - New `verified_no_si_dois` list — DOIs the user has personally verified
+    to have no SI material. Refs with these DOIs get `si_status=not_applicable (verified_no_si)`
+    in the report instead of `not_found`. Avoids treating known-empty refs
+    as failures + cuts noise on re-runs.
+  - `config.example.toml` shows the syntax (commented-out example).
+  - Implementation: new `UserConfig` dataclass in `_config.py`;
+    `init_user_config()` parallel to `init_institution_config()` (same
+    lru_cache + cache_clear contract); `verified_no_si_dois()` getter
+    in `download_refs.py` (lru_cached, returns case-insensitive frozenset);
+    wired into the SI capture point — when `get_si_links` returns empty
+    AND the DOI is in the user-marked set, status becomes
+    `not_applicable (verified_no_si)` and events.jsonl logs `ignored`
+    with `verified_no_si` detail instead of `not_found`.
+
+### Deferred to v0.5
+
+- `try_ccs_si_asset` (CCS-specific SI capture path) — needs integration
+  with existing SI flow; the `ccs` strategy currently falls through
+  generic_fallback.
+- SI post-retry sweep (`retry_pending_si_for_downloaded_mains` from
+  the `.agents` working copy) — invasive end-of-main() rework, lands
+  with the broader SI capture refactor.
+- Wire-in of Commit C's Elsevier helpers (deferred-click integration,
+  `auto_retry_elsevier_article_reclicks`, `try_elsevier_si_download_all`)
+  — these mutate page state inside `try_elsevier_pdf` / `try_click_pdf`,
+  the riskiest part of the codebase. Held until SI rework provides a
+  clean integration shape.
+
 ### Added — Fail-fast mode
 
 - New flag `--fail-fast` (also `REF_DOWNLOADER_FAIL_FAST=1`) terminates the

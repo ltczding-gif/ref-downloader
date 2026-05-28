@@ -49,3 +49,17 @@ auth_url_fragments  = []
 auth_page_titles    = []
 auth_loading_titles = []
 ignored_access_dois = []
+
+[user]
+# Optional: DOIs you have personally verified to have no supplementary
+# material. Refs with these DOIs get `si_status=not_applicable (verified_no_si)`
+# in the report instead of `not_found` — useful when re-running the same
+# project and you don't want the SI capture path to keep retrying refs you
+# already know are SI-less. Comparisons are case-insensitive.
+#
+# Example:
+#   verified_no_si_dois = [
+#       "10.1021/acs.chemrev.0c01088",
+#       "10.1039/c7sm01253e",
+#   ]
+verified_no_si_dois = []

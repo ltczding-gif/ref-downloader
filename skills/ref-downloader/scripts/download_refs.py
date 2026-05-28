@@ -54,7 +54,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright, Error a
 
 from functools import lru_cache
 
-from _config import load_config, InstitutionConfig
+from _config import load_config, InstitutionConfig, UserConfig
 
 # Institution-specific patterns are loaded from config.local.toml at startup
 # via init_institution_config(). Stays empty for vanilla open-internet use.
@@ -73,6 +73,7 @@ from _config import load_config, InstitutionConfig
 # stale values. There is no automatic file-watcher today; if you add one,
 # extend init_institution_config or factor a shared `_clear_runtime_caches()`.
 _INSTITUTION: InstitutionConfig = InstitutionConfig()
+_USER: UserConfig = UserConfig()
 
 
 def init_institution_config(cfg_institution: InstitutionConfig) -> None:
@@ -94,6 +95,17 @@ def init_institution_config(cfg_institution: InstitutionConfig) -> None:
     _auth_loading_titles.cache_clear()
     ignored_institution_access_dois.cache_clear()
     get_edge_user_data_dir.cache_clear()
+
+
+def init_user_config(cfg_user: UserConfig) -> None:
+    """Set per-user runtime config (verified_no_si_dois etc); called once
+    from main() alongside init_institution_config. Same lru_cache contract:
+    clears verified_no_si_dois.cache_clear() so reads after init see fresh
+    values.
+    """
+    global _USER
+    _USER = cfg_user
+    verified_no_si_dois.cache_clear()
 
 
 @lru_cache(maxsize=1)
@@ -143,6 +155,15 @@ def _auth_page_titles() -> tuple:
 @lru_cache(maxsize=1)
 def _auth_loading_titles() -> tuple:
     return tuple(_INSTITUTION.auth_loading_titles)
+
+
+@lru_cache(maxsize=1)
+def verified_no_si_dois() -> frozenset:
+    """DOIs the user marked as having no SI material in [user].verified_no_si_dois.
+    Refs matching get `si_status=not_applicable (verified_no_si)` instead of
+    `not_found` — avoids treating known-empty refs as failures.
+    """
+    return frozenset(d.lower() for d in _USER.verified_no_si_dois if d)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # These timeouts deliberately bias toward interactive stability instead of pure throughput.
@@ -421,6 +442,7 @@ PUBLISHER_STRATEGIES: Dict[str, Dict[str, str]] = {
     "osa": {"family": "generic_fallback", "support": "stable", "min_test": "route_selector_smoke"},
     "kps": {"family": "generic_fallback", "support": "stable", "min_test": "route_selector_smoke"},
     "beilstein": {"family": "generic_fallback", "support": "weak", "min_test": "strategy_coverage_smoke"},
+    "ccs": {"family": "generic_fallback", "support": "weak", "min_test": "cloudflare_blocked_official_route"},
 }
 
 
@@ -1805,6 +1827,12 @@ async def resume_ref_from_manual_pages(
 
 def direct_pdf_url(doi: str, publisher: str) -> Optional[str]:
     """Construct direct PDF download URL. Returns None when only click/article flow is trusted."""
+    # APS journals: bypass the JS-driven landing page entirely via journals.aps.org/<slug>/pdf/<doi>.
+    # aps_pdf_url_from_doi returns None for non-APS DOIs or journals not in APS_JOURNAL_SLUGS.
+    if publisher == "aps":
+        aps_url = aps_pdf_url_from_doi(doi)
+        if aps_url:
+            return aps_url
     nature_slug = doi.split("/")[-1].replace(".", "")
     urls = {
         "acs":      f"https://pubs.acs.org/doi/pdf/{doi}",
@@ -1817,7 +1845,8 @@ def direct_pdf_url(doi: str, publisher: str) -> Optional[str]:
         "ecs":      f"https://iopscience.iop.org/article/{doi}/pdf",
         "iop":      f"https://iopscience.iop.org/article/{doi}/pdf",
         # AIP: no reliable direct URL without article-id; use doi.org redirect
-        # IEEE, OSA, KPS, APS, Annual Reviews, T&F: navigate to article page
+        # IEEE, OSA, KPS, Annual Reviews, T&F: navigate to article page
+        # APS handled above via aps_pdf_url_from_doi.
         # AVS (JVST): hosted on pubs.aip.org via doi.org
         "avs":      f"https://doi.org/{doi}",
     }
@@ -4654,10 +4683,24 @@ async def download_one(ctx: BrowserContext, ref: dict,
                 await handle_access_barrier(page, "si")
 
                 si_links = await get_si_links(page, publisher, doi)
-                log_event("si", "extract_links", "found" if si_links else STATUS_NOT_FOUND, page.url, ", ".join(si_links[:2]))
+                doi_verified_no_si = (doi or "").lower() in verified_no_si_dois()
+                if si_links:
+                    log_event("si", "extract_links", "found", page.url, ", ".join(si_links[:2]))
+                else:
+                    log_event(
+                        "si",
+                        "extract_links",
+                        STATUS_IGNORED if doi_verified_no_si else STATUS_NOT_FOUND,
+                        page.url,
+                        "verified_no_si" if doi_verified_no_si else "",
+                    )
                 if not si_links:
-                    result["si_status"] = STATUS_NOT_FOUND
-                    print("       SI: not found")
+                    if doi_verified_no_si:
+                        result["si_status"] = "not_applicable (verified_no_si)"
+                        print("       SI: verified no SI")
+                    else:
+                        result["si_status"] = STATUS_NOT_FOUND
+                        print("       SI: not found")
                 else:
                     si_url = si_links[0]
                     print(f"       SI: {si_url[:80]}")
@@ -4975,6 +5018,7 @@ async def main():
 
     cfg = load_config()
     init_institution_config(cfg.institution)
+    init_user_config(cfg.user)
 
     project_dir, validated_path = resolve_input(sys.argv[1])
 

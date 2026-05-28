@@ -278,7 +278,7 @@ Agent 用户可从 [`skills/ref-downloader/SKILL.md`](skills/ref-downloader/SKIL
 
 ## 已支持出版商
 
-ACS、Nature、Science、Elsevier、Wiley、RSC、Springer、PNAS、ECS、IOP、AIP、AVS、IEEE、OSA、KPS、Beilstein、APS、Annual Reviews、Taylor & Francis。成熟度因出版商而异，详细分级表与已知问题见 [`docs/SUPPORTED_PUBLISHERS.md`](docs/SUPPORTED_PUBLISHERS.md)。
+ACS、Nature、Science、Elsevier、Wiley、RSC、Springer、PNAS、ECS、IOP、AIP、AVS、IEEE、OSA、KPS、Beilstein、APS、Annual Reviews、Taylor & Francis、CCS Chemistry。成熟度因出版商而异，详细分级表与已知问题见 [`docs/SUPPORTED_PUBLISHERS.md`](docs/SUPPORTED_PUBLISHERS.md)。CCS Chemistry 站点在 Cloudflare 后面，配合 `REF_DOWNLOADER_BROWSER=cloak` 使用最稳。
 
 ## 已知限制
 
