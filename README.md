@@ -3,7 +3,7 @@
 > **Stop losing an afternoon to chasing dozens of reference PDFs by hand.**
 > One DOI in, every reference PDF out — using your existing institutional access.
 
-[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-orange.svg)](CHANGELOG.md)
+[![Version: 0.4.1](https://img.shields.io/badge/version-0.4.1-orange.svg)](CHANGELOG.md)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#known-limitations)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -11,7 +11,7 @@
 
 [中文完整文档 / Full Chinese version](README.zh.md)
 
-> **Status: beta (v0.4.0).** Windows + Microsoft Edge verified path. macOS / Linux / Chromium untested. Expect rough edges around supplementary downloads and publisher-site changes. PR-worthy issues welcome.
+> **Status: beta (v0.4.1).** Windows + Microsoft Edge verified path. macOS / Linux / Chromium untested. Expect rough edges around supplementary downloads and publisher-site changes. PR-worthy issues welcome.
 
 > **Heads up — not a paywall bypass.** ref-downloader uses _your_ institutional access. If your university or organization subscribes to a journal, those refs work. If they don't, those refs become `manual_pending` for you to follow up on by hand.
 
@@ -70,6 +70,7 @@ PDFs land in:      ./jacs.5c05017_refs/jacs.5c05017/
 
 - **Paywalled refs work without setup.** _Drives your real Microsoft Edge profile, so any institutional login already in your browser carries through. No API keys, no proxies, no reverse engineering._
 - **One DOI in, every reference PDF out.** _Crossref-driven extraction + 17+ publisher-specific download paths (Wiley PDFDirect, Elsevier viewer, AIP loading-page wait — see [per-publisher reliability tier](docs/SUPPORTED_PUBLISHERS.md)), not generic scraping._
+- **Two routing modes from an agent** (v0.4.1+). _**Mode A**: hand the agent one paper, get all of its references. **Mode B**: hand the agent a custom list — DOIs / titles / arXiv-PMID IDs / BibTeX / abstract queries like "Wang 2024 Nature Energy papers" — and it resolves to DOIs and downloads them. See [SKILL.md](skills/ref-downloader/SKILL.md)._
 - **You always know which refs failed and why.** _`download_report.csv` gives every ref a status + reason (`manual_pending (auth_redirect)`, `failed (challenge_timeout)`, `ignored`); `events.jsonl` keeps the per-ref event trace._
 - **Pick up where you left off** after a VPN drop, browser crash, or `Ctrl+C`. _State persists per project; rerunning skips already-downloaded refs and retries only the failures._
 

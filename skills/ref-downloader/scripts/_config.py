@@ -29,7 +29,7 @@ PLACEHOLDER_MAILTO = "your.email@example.com"
 
 # Single source of truth for the User-Agent app version. Keep in sync with
 # CHANGELOG.md when releasing.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 APP_NAME = "RefDownloader"
 
 

@@ -3,7 +3,7 @@
 > **别再花一下午追几十篇参考文献 PDF。**
 > 输入一个 DOI，全部参考文献自动到手——用你已有的机构访问权。
 
-[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-orange.svg)](CHANGELOG.md)
+[![Version: 0.4.1](https://img.shields.io/badge/version-0.4.1-orange.svg)](CHANGELOG.md)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#已知限制)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -11,7 +11,7 @@
 
 [English full version](README.md)
 
-> **状态：beta (v0.4.0)。** 仅在 Windows + Microsoft Edge 验证过。macOS / Linux / Chromium 未测试。SI 下载和出版商页面变动是当前最容易出问题的地方。欢迎提 issue / PR。
+> **状态：beta (v0.4.1)。** 仅在 Windows + Microsoft Edge 验证过。macOS / Linux / Chromium 未测试。SI 下载和出版商页面变动是当前最容易出问题的地方。欢迎提 issue / PR。
 
 > **重要——不是付费墙绕过工具。** ref-downloader 用的是 _你_ 的机构访问权。如果你的学校/单位订阅了某期刊，那条参考文献就能下；如果没订阅，那条会标 `manual_pending` 等你手动跟进。
 
@@ -70,6 +70,7 @@ PDFs land in:      ./jacs.5c05017_refs/jacs.5c05017/
 
 - **机构付费内容免配置就能下。** _直接驱动你真实的 Microsoft Edge 配置文件，浏览器里登录过的会话自然继承。不要 API key、不要代理、不需逆向工程。_
 - **一个 DOI 输入，全部参考文献 PDF 输出。** _Crossref 驱动 + 17+ 家出版商专用下载路径（Wiley PDFDirect、Elsevier viewer、AIP 加载页等待——见 [出版商可靠度分级表](docs/SUPPORTED_PUBLISHERS.md)），不是通用爬虫。_
+- **Agent 两种调用模式**（v0.4.1+）。_**Mode A**：丢一篇论文，下它的全部参考文献。**Mode B**：丢一个自定义列表 —— DOI / 文献标题 / arXiv-PMID / BibTeX / 抽象描述（"Wang 2024 年 Nature Energy 上的氢演化文章"）—— Agent 自动解析成 DOI 列表然后下载。详见 [SKILL.md](skills/ref-downloader/SKILL.md)。_
 - **失败的条目和原因一目了然。** _`download_report.csv` 给每篇参考文献状态 + 原因（`manual_pending (auth_redirect)`、`failed (challenge_timeout)`、`ignored`），`events.jsonl` 留每篇的事件流。_
 - **断点续跑**：VPN 断、浏览器崩、`Ctrl+C` 后都能继续。 _状态按项目目录持久化；重跑自动跳过已下载、只重试失败。_
 

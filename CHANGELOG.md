@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-06-01
+
+Docs-only release. Zero Python source changes; pytest 10/10 still passes.
+Patch-level bump (not minor) because the underlying pipeline is unchanged
+— this strictly expands what the agent runbook can route, not what the
+scripts can do.
+
+### Added — Mode B (custom batch download) in SKILL.md
+
+- New top-level `## Mode router` section. Agents read this first to
+  decide between Mode A (the v0.4.0 original — "all refs of a paper")
+  and Mode B (new — "these papers themselves").
+- 11-row Trigger family table covering: ≥2 DOIs in any wrapping
+  (bare / `{}` / URL-prefixed / full-width slash); non-DOI identifiers
+  (arXiv / PMID / Semantic Scholar IDs); title lists; abstract queries
+  ("Wang 2024 Nature Energy papers on hydrogen evolution"); mixed
+  input; ambiguous / insufficient input.
+- 5 Mode B sub-flows:
+  - **Step 0 — Canonicalize**: BibTeX braces, URL prefixes, full-width
+    slashes, Unicode punctuation normalized BEFORE the regex pass.
+  - **B.0 — Normalize non-DOI IDs**: arXiv → `10.48550/arXiv.<id>` (or
+    journal DOI via Crossref bibliographic), PMID → eutils lookup,
+    Semantic Scholar ID → SS API lookup. Network preflight via HEAD
+    probe.
+  - **B.1 — Direct DOI extraction**: regex character class excludes
+    `{}` so BibTeX `doi = {10.x/y}` doesn't leak braces. <50% yield
+    falls back to B.2.
+  - **B.2 — Title → DOI lookup**: Crossref `query.title` with relative
+    score ratio (top-2 < 1.5) + token overlap sanity check (Crossref
+    `score` is unbounded, absolute thresholds are meaningless).
+    Confidence: high / low / unresolved; low excluded by default.
+  - **B.3 — Discovery from abstract description**: tool ladder
+    Crossref → OpenAlex → Semantic Scholar (rate-limited, 30s backoff)
+    → PubMed (biomed) → WebSearch (last resort). Explicitly forbids
+    scraping Google Scholar. Open-ended-query clarifier asks user
+    to scope when >50 candidates.
+- **Full confirm table** (not top-5 preview): every row labeled with
+  source + confidence; low-confidence rows excluded by default and
+  require explicit user pick.
+- **Append rule**: canonicalize new DOIs before dedupe compare;
+  new ids start at `max(existing_ids) + 1`; never renumber existing
+  entries (preserves `validate_refs.py`'s `id`-keyed incremental skip).
+- 10 Mode-B-specific failure mode rows added to the shared failure
+  table (BibTeX `}` leak, Step 0 bypass, network down, Semantic
+  Scholar 429, conversational input refuse, etc).
+- Cross-mode compatibility documented: `--auto`, `--fail-fast`,
+  `[user].verified_no_si_dois`, CloakBrowser backend all work with
+  Mode B (verified by reading `download_refs.py:4686-4699, 5166-5177`).
+
+### Added — Design doc
+
+- `docs/plans/2026-05-28-mode-b-custom-batch-design.md` (530 lines)
+  captures the full design, the 15 risks identified by 2-round
+  adversarial review (Opus + Codex gpt-5.5 high effort), and the
+  3 acknowledged-but-not-fully-fixed risks (Semantic Scholar 429
+  honor-system pacing, B.3 discovery confidence ranking, Mode B
+  resumption across sessions).
+
+### Verified
+
+- pytest 10/10 still passes.
+- 13-test merged plan executed: Tier 1 simulations (S1 heredoc shape;
+  M3 BibTeX brace exclusion; M4 full-width slash canonicalization with
+  control proving raw regex misses it; S5 canonical dedupe) all pass.
+  Tier 1 live scripts (S2 `validate_refs.py` accepts hand-built
+  `refs_raw.json` with `parent_doi=""`; S4 two-round append with
+  `Verified: 3 (2 cached + 1 new)` proving incremental skip works
+  on Mode B input; S6 wrapper refuses list/garbage with clear error)
+  all pass. Tier 3 routing dispatched to a fresh agent across 5
+  scenarios (Mode A canonical / single DOI / conversational refuse /
+  mixed bag / ambiguous ask): 5/5 correctly cite the matching
+  trigger family row.
+
+### Why patch-level (0.4.1) not minor (0.5.0)?
+
+Strict semver would argue minor — Mode B is an agent-visible new
+capability. But:
+- Zero Python code changed. Anyone running scripts directly (not
+  through an agent) sees byte-identical behavior.
+- The pipeline (`extract_refs.py` / `validate_refs.py` /
+  `download_refs.py`) is unchanged.
+- The "new feature" is purely runbook routing on the agent side.
+
+Patch-level signals "no install / re-pip needed; just re-copy the
+skill folder if you want the new Mode B docs."
+
 ## [0.4.0] — 2026-05-28
 
 Tranched merge of improvements from the maintainer's working copy. Five
